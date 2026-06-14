@@ -17,6 +17,11 @@
 gw() {
   local home out kind dir b64 b64l rc tsx root prompt launcher d
 
+  # The launcher default (`claude --permission-mode auto`) is word-split below by leaving
+  # ${launcher:-...} unquoted — bash does this automatically, zsh does not. Enable it for
+  # zsh, scoped to this function (local_options restores it on return).
+  [ -n "${ZSH_VERSION:-}" ] && setopt local_options sh_word_split
+
   # GW_HOME: dir of this script (resolve symlinks for the common `source ~/link` case).
   if [ -n "${BASH_SOURCE[0]:-}" ]; then home="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   elif [ -n "${(%):-%x}" ]; then home="$(cd "$(dirname "${(%):-%x}")" && pwd)"   # zsh
