@@ -76,7 +76,7 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
   const text = (): string => lines.join('\n');
 
   // ── layout: soft-wrap logical lines into display rows of width W ──
-  const innerW = (): number => Math.max(20, Math.min((err.columns || 80) - 4, 96));
+  const innerW = (): number => Math.max(20, (err.columns || 80) - 4);
   function layout(W: number): DRow[] {
     const rows: DRow[] = [];
     for (let li = 0; li < lines.length; li++) {
