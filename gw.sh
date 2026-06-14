@@ -39,6 +39,13 @@ gw() {
     [ -z "$root" ] && root="$PWD"
   fi
 
+  # If we're stranded in a deleted worktree (e.g. a prior in-claude `done`/`abort`
+  # removed the worktree we were sitting in), land somewhere real BEFORE invoking
+  # node — tsx/esbuild call process.cwd() at startup and would otherwise die with
+  # `uv_cwd ENOENT` before any gw.ts logic runs. Root resolution above is pure
+  # shell (dirname on the $PWD string), so it survives a dead cwd to get us here.
+  if ! pwd -P >/dev/null 2>&1; then cd "$root" 2>/dev/null || cd "$HOME" || return 1; fi
+
   tsx="$home/node_modules/.bin/tsx"
   out="$(mktemp)"
   if [ -x "$tsx" ]; then

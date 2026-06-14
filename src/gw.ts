@@ -376,8 +376,17 @@ async function fastForwardCanonical(mainDir: string, base: string): Promise<void
 }
 
 // After done/abort, cd the shell back to the workspace root — unless we're inside the
-// agent (--in-claude), where there's nothing to cd.
-function finishCd(flags: Flags): void { if (!flags.inClaude) emit('CD', REPO_ROOT); else emit('NONE'); }
+// agent (--in-claude), where we can't cd the agent's shell. In that case, if the
+// removal just deleted the worktree that IS the agent's cwd, warn it explicitly:
+// otherwise its NEXT Bash call dies with `uv_cwd ENOENT` from the now-deleted dir
+// (the same failure the gw.sh wrapper guards against for the user's own shell).
+function finishCd(flags: Flags): void {
+  if (!flags.inClaude) { emit('CD', REPO_ROOT); return; }
+  emit('NONE');
+  let cwdGone = false;
+  try { if (!fs.existsSync(process.cwd())) cwdGone = true; } catch { cwdGone = true; }
+  if (cwdGone) log(`this session's worktree is gone — run \`cd ${REPO_ROOT}\` before any further commands (the shell is now in a deleted directory).`);
+}
 
 // ── abort ────────────────────────────────────────────────────────────────────
 
