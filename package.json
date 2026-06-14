@@ -1,0 +1,23 @@
+{
+  "name": "@siverson914/gw",
+  "version": "0.1.0",
+  "description": "Grove Workspace — parallel, isolated agent work-sessions across many git repos, with a safe one-shot land and a deploy-readiness check.",
+  "type": "module",
+  "bin": {
+    "gw": "./src/gw.ts"
+  },
+  "scripts": {
+    "gw": "tsx src/gw.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/gw.ts --help"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
