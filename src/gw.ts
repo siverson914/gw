@@ -217,17 +217,34 @@ async function cmdDone(flags: Flags): Promise<void> {
       continue;
     }
     await git(wt, ['add', '-A']);
-    // A worktree-linked dep/env path must NEVER be committed. If a stale base
-    // .gitignore let one get staged, unstage it and carry on — self-healing.
+    // A worktree-linked dep/env path must NEVER appear in a commit — neither added
+    // NOR deleted. Reset the index entry back to HEAD: for a path that is tracked in
+    // the base this restores it (commit records no change); for an untracked path it
+    // simply unstages. NEVER `git rm --cached` here — for a TRACKED linkPath that
+    // stages a DELETION that then lands on the base branch (this is how a tracked
+    // `.env` got wiped from origin/main). Self-healing + loud, since a tracked
+    // linkPath is a repo-hygiene bug the user should fix.
     for (const rel of await stagedLinkPaths(wt, repo)) {
-      await git(wt, ['rm', '--cached', '-r', '--ignore-unmatch', rel]);
-      log(`[${repo}] unstaged linked path '${rel}' (worktree symlink kept out of the commit — harden ${repo}/.gitignore)`);
+      await git(wt, ['reset', '-q', 'HEAD', '--', rel]);
+      log(`[${repo}] linked path '${rel}' is TRACKED in ${repo} — left untouched (NOT committed/deleted). Fix: add it to ${repo}/.gitignore and \`git rm --cached ${rel}\` in a deliberate commit so gw can symlink it cleanly.`);
     }
     if ((await git(wt, ['diff', '--cached', '--quiet'])).code !== 0) await git(wt, ['commit', '-m', `wip: ${session}`]);
     if (parseInt(await gitOut(wt, ['rev-list', '--count', `origin/${REPOS[repo].base}..HEAD`]) || '0', 10) > 0) {
       pending.push({ repo, wt, branch, name: session });
     }
   }
+  // Safety net for the "edited the wrong copy" mistake: a repo whose CANONICAL
+  // checkout has uncommitted edits while THIS session's worktree has none. gw lands
+  // only the worktree, so those edits would be silently left behind. Warn loudly —
+  // non-fatal (the canonical tree may hold unrelated work), just surface it.
+  for (const repo of REPO_KEYS) {
+    if (pending.some((p) => p.repo === repo)) continue;
+    const dirty = (await gitOut(REPOS[repo].dir, ['status', '--porcelain'])).trim();
+    if (dirty) {
+      log(`[${repo}] WARNING: uncommitted changes in the CANONICAL checkout (${REPOS[repo].dir}) but nothing in this session's worktree — did you edit the wrong copy? gw will NOT land these.`);
+    }
+  }
+
   if (!pending.length) { log(`nothing to merge in ${session}.`); await removeSession(WORKTREES_DIR, session, REPO_KEYS, branch); return finishCd(flags); }
   log(`${session} changed: ${pending.map((p) => p.repo).join(', ')}`);
 
