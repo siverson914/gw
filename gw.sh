@@ -6,9 +6,11 @@
 # itself, based on one directive line the helper writes to a temp file ($GW_OUT).
 # Same pattern as nvm / zoxide / direnv.
 #
-# Install: add this line to your ~/.bashrc (or ~/.zshrc):
+# Install: from the cloned repo, `npm install` then `npm run gw install` — that appends
 #     source /path/to/gw/gw.sh
-# then run `gw init` in the directory that holds your repos (once per workspace).
+# to your shell rc for you (idempotent; --rc <file> to target one, --print to just show
+# the line). Then open a new shell, `gw doctor` to verify, and `gw init` in the directory
+# that holds your repos (once per workspace).
 #
 # GW_HOME  = where gw is installed (this file's dir) — holds tsx + src/gw.ts.
 # GW_ROOT  = the workspace (the dir with gw.config.json). Auto-discovered by walking

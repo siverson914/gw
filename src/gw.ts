@@ -7,6 +7,11 @@
  * script does ALL the git/gh/gate work and writes ONE directive line to the file
  * named by $GW_OUT for the shell to act on.
  *
+ *   gw install          wire the `gw` shell function into your rc (~/.bashrc or
+ *                       ~/.zshrc), idempotently — the one first-run step a child
+ *                       process can't do for you. Run once as `npm run gw install`.
+ *   gw doctor           preflight: git/gh/node/tsx/claude + whether the shell is
+ *                       wired up + whether you're in a workspace. Run this first.
  *   gw init             scaffold a workspace: detect sibling repos (or clone the
  *                       ones named with --repo), write gw.config.json, install the
  *                       /done, /abort, /donedone slash commands.
@@ -399,6 +404,101 @@ async function cmdAbort(flags: Flags): Promise<void> {
   return finishCd(flags);
 }
 
+// ── install / doctor: first-run shell wiring + environment check ──────────────
+
+// The exact line a shell rc needs so the `gw` function exists in every new shell.
+// Always an ABSOLUTE path to THIS checkout's gw.sh — never a hardcoded ~/gw — so gw
+// works no matter where it was cloned.
+function sourceLine(): string { return `source ${path.join(GW_HOME, 'gw.sh')}`; }
+
+// rc files (that exist) already sourcing THIS gw.sh — so install is idempotent and
+// doctor can report whether the shell is wired up.
+function rcFilesSourcing(): string[] {
+  const marker = path.join(GW_HOME, 'gw.sh');
+  const out: string[] = [];
+  for (const name of ['.bashrc', '.zshrc', '.bash_profile', '.profile']) {
+    const p = path.join(os.homedir(), name);
+    try { if (fs.readFileSync(p, 'utf-8').includes(marker)) out.push(p); } catch { /* absent */ }
+  }
+  return out;
+}
+
+// Best-guess rc for the user's login shell; overridable with --rc.
+function defaultRc(): string {
+  return path.join(os.homedir(), (process.env.SHELL || '').includes('zsh') ? '.zshrc' : '.bashrc');
+}
+
+// `gw install` — wire `gw` into the shell rc, idempotently. This is the ONE step a
+// child process normally can't do for you, so we make it a first-class command (run it
+// once as `npm run gw install` before the function exists). --print just emits the line
+// (for piping/manual setups); --rc <path> targets a specific rc.
+async function cmdInstall(flags: Flags): Promise<void> {
+  const line = sourceLine();
+  if (flags.print) { console.log(line); emit('NONE'); return; }
+
+  const rc = flags.rc ? path.resolve(flags.rc) : defaultRc();
+  const already = rcFilesSourcing();
+  if (already.includes(rc)) { log(`already installed in ${rc} — nothing to do.`); emit('NONE'); return; }
+  if (already.length) log(`note: gw.sh is also sourced from ${already.join(', ')}`);
+
+  try {
+    fs.appendFileSync(rc, `\n# gw — Grove Workspace\n${line}\n`);
+  } catch (e) {
+    log(`could not write ${rc}: ${e instanceof Error ? e.message : String(e)}`);
+    log(`add this line to your shell rc by hand:\n  ${line}`);
+    emit('NONE'); return;
+  }
+  log(`added to ${rc}:  ${line}`);
+  log(`open a new shell (or: source ${rc}), then \`gw doctor\` to verify, and \`gw init\` in the dir that holds your repos.`);
+  emit('NONE');
+}
+
+// `gw doctor` — preflight the environment so the next person sees ✓/✗ up front instead
+// of discovering each gap mid-command. Exits non-zero only on a MISSING REQUIRED tool.
+async function cmdDoctor(): Promise<void> {
+  const tick = (ok: boolean) => (ok ? 'ok ' : '!! ');
+  let missingRequired = false;
+
+  const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+  const nodeOk = nodeMajor >= 18;
+  if (!nodeOk) missingRequired = true;
+  log(`${tick(nodeOk)}node ${process.versions.node}${nodeOk ? '' : ' — gw needs node >= 18'}`);
+
+  // gw.sh prefers the local tsx; npx is a slow fallback. Treat a missing local tsx as
+  // a required gap — it means `npm install` wasn't run here.
+  const tsxOk = fs.existsSync(path.join(GW_HOME, 'node_modules', '.bin', 'tsx'));
+  if (!tsxOk) missingRequired = true;
+  log(`${tick(tsxOk)}tsx (local)${tsxOk ? '' : ` — run 'npm install' in ${GW_HOME}`}`);
+
+  const tools: Array<[string, boolean, string]> = [
+    ['git', true, 'required for everything'],
+    ['gh', false, 'only for --pr and `gw init --repo`'],
+    ['claude', false, 'the default launcher/namer (configurable in gw.config.json)'],
+  ];
+  for (const [bin, required, note] of tools) {
+    const found = (await run('bash', ['-lc', `command -v ${bin}`])).code === 0;
+    if (required && !found) missingRequired = true;
+    log(`${tick(found || !required)}${pad(bin, 8)}${found ? '' : ` missing — ${note}`}`);
+  }
+
+  const sourced = rcFilesSourcing();
+  log(sourced.length
+    ? `ok shell: gw.sh sourced from ${sourced.join(', ')}`
+    : `!! shell: gw.sh not sourced in any rc — run \`gw install\` (or add: ${sourceLine()})`);
+
+  // Workspace is optional — doctor runs anywhere. Report it if we're in one.
+  try {
+    const w = loadWorkspace();
+    log(`ok workspace: ${w.root} (${w.repoKeys.length} repo(s): ${w.repoKeys.join(', ')})`);
+  } catch {
+    log(`.. workspace: no ${CONFIG_NAME} here — run \`gw init\` in the dir that holds your repos`);
+  }
+
+  if (missingRequired) { die('doctor: missing required tools above.'); }
+  log('doctor: all required tools present.');
+  emit('NONE');
+}
+
 // ── setup ────────────────────────────────────────────────────────────────────
 
 function tsxCmd(): string {
@@ -422,7 +522,7 @@ async function cmdSetup(): Promise<void> {
   }
   for (const k of REPO_KEYS) log(`${fs.existsSync(path.join(REPOS[k].dir, '.git')) ? 'ok' : '!!'}  ${k} repo at ${REPOS[k].dir}`);
   for (const bin of ['git', 'gh', 'claude', 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
-  log(`add to your shell rc:  source ${path.join(GW_HOME, 'gw.sh')}`);
+  log(rcFilesSourcing().length ? `shell: gw.sh already sourced (gw doctor to verify).` : `enable the gw command:  gw install   (adds '${sourceLine()}' to your shell rc)`);
 }
 
 async function ghHandle(dir: string): Promise<string> {
@@ -697,22 +797,22 @@ async function cmdInit(flags: Flags): Promise<void> {
   log('');
   log('next:');
   log(`  1. review ${CONFIG_NAME} (gates are best-guesses — fix any that are wrong)`);
-  log(`  2. add to your shell rc:  source ${path.join(GW_HOME, 'gw.sh')}`);
-  log(`  3. open a new shell, then run \`gw start\` from ${root}`);
+  log(`  2. enable the gw command:  gw install   (or add by hand: ${sourceLine()})`);
+  log(`  3. open a new shell, \`gw doctor\` to verify, then \`gw start\` from ${root}`);
 }
 
 // ── flags + dispatch ─────────────────────────────────────────────────────────
 
 interface Flags {
   dryRun: boolean; noCheck: boolean; pr: boolean; inClaude: boolean; yes: boolean;
-  echoPrompt: boolean; simulatePushReject: boolean; force: boolean;
-  message: string; session: string; olderThan: string; repoFlags: string[];
+  echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
+  message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
 }
 function parseFlags(argv: string[]): Flags {
   const f: Flags = {
     dryRun: false, noCheck: false, pr: false, inClaude: false, yes: false,
-    echoPrompt: false, simulatePushReject: false, force: false,
-    message: '', session: '', olderThan: '', repoFlags: [],
+    echoPrompt: false, simulatePushReject: false, force: false, print: false,
+    message: '', session: '', olderThan: '', repoFlags: [], rc: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -724,6 +824,8 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--force') f.force = true;
     else if (a === '--echo-prompt') f.echoPrompt = true;
     else if (a === '--simulate-push-reject') f.simulatePushReject = true;
+    else if (a === '--print') f.print = true;
+    else if (a === '--rc') f.rc = argv[++i] ?? '';
     else if (a === '--older-than') f.olderThan = argv[++i] ?? '';
     else if (a === '--repo') f.repoFlags.push(argv[++i] ?? '');
     else if (a === '-m' || a === '--message') f.message = argv[++i] ?? '';
@@ -734,6 +836,8 @@ function parseFlags(argv: string[]): Flags {
 
 const HELP = `gw — Grove Workspace
 
+  gw install [--rc <file>] [--print]          wire the gw command into your shell rc
+  gw doctor                                   check tools + shell wiring (run this first)
   gw init [--repo owner/name ...] [--force]   scaffold gw.config.json + slash commands
   gw start [WS-id]                            branch every repo, launch the agent
   gw done [--pr] [--no-check] [-m msg]        gate + squash-merge each changed repo
@@ -750,6 +854,8 @@ const flags = parseFlags(rest);
 (async () => {
   if (sub === undefined || sub === '--help' || sub === '-h' || sub === 'help') { console.log(HELP); return; }
   if (sub === 'init') return cmdInit(flags);
+  if (sub === 'install') return cmdInstall(flags);   // no workspace needed — wires the shell
+  if (sub === 'doctor') return cmdDoctor();           // no workspace needed — checks the env
 
   bind(loadWorkspace());
   switch (sub) {
@@ -760,6 +866,6 @@ const flags = parseFlags(rest);
     case 'ready': return cmdReady();
     case 'prune': return cmdPrune(flags);
     case 'setup': return cmdSetup();
-    default: die(`unknown subcommand "${sub}". use: init | start | done | abort | status | ready | prune | setup`);
+    default: die(`unknown subcommand "${sub}". use: install | doctor | init | start | done | abort | status | ready | prune | setup`);
   }
 })().catch((e) => die(e instanceof Error ? e.message : String(e)));

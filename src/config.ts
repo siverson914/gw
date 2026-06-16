@@ -81,7 +81,14 @@ export function hexAnsi(hex: string): string {
  *  containing gw.config.json. Returns null if neither yields one. */
 export function findRoot(start = process.cwd()): string | null {
   const env = process.env.GW_ROOT;
-  if (env) return path.resolve(env);
+  if (env) {
+    const root = path.resolve(env);
+    if (fs.existsSync(path.join(root, CONFIG_NAME))) return root;
+    // GW_ROOT is set but holds no config. gw.sh falls GW_ROOT back to $PWD when it
+    // can't find a workspace, so an unconfigured dir lands here — don't trust it, or
+    // we'd mask the helpful "run gw init" message with a raw ENOENT. Fall through to
+    // the walk-up from `start` (a real, config-bearing GW_ROOT already returned above).
+  }
   let dir = path.resolve(start);
   for (;;) {
     if (fs.existsSync(path.join(dir, CONFIG_NAME))) return dir;
@@ -97,7 +104,7 @@ export function loadWorkspace(start = process.cwd()): Workspace {
   const root = findRoot(start);
   if (!root) {
     throw new Error(
-      `no ${CONFIG_NAME} found here or in any parent (and GW_ROOT is unset).\n` +
+      `no ${CONFIG_NAME} found here or in any parent.\n` +
       `Run \`gw init\` in the directory that holds your repos to create one.`,
     );
   }

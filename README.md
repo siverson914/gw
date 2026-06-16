@@ -12,6 +12,7 @@ you actually touched. Run several sessions side-by-side; your live checkouts are
 edited in place, only merged into.
 
 ```
+gw install  →   wire the gw command into your shell (one time, idempotent)
 gw init     →   detect your repos, write config, install slash commands
 gw start    →   type a prompt; gw branches every repo and launches your agent
 /done       →   gate + squash-merge + push — only the repos you changed
@@ -25,10 +26,15 @@ No worktree juggling. No "which branch was I on?" No half-landed cross-repo chan
 ## 60-second start
 
 ```bash
-git clone https://github.com/siverson914/gw ~/gw
-cd ~/gw && npm install
-echo 'source ~/gw/gw.sh' >> ~/.zshrc      # or ~/.bashrc — then open a new shell
+git clone https://github.com/siverson914/gw    # clone anywhere
+cd gw && npm install
+npm run gw install                              # appends `source <this-clone>/gw.sh` to your rc
+exec $SHELL                                     # reload — then `gw doctor` to verify
 ```
+
+`gw install` writes the **absolute path of this clone** into your `~/.bashrc` or
+`~/.zshrc` (idempotent; `--rc <file>` to target one, `--print` to just show the line).
+`gw doctor` checks tools + shell wiring and tells you what's missing.
 
 Point it at the directory that holds your repos as siblings:
 
@@ -72,6 +78,8 @@ worktree, launch the agent."* `gw` adds the two halves they leave out:
 
 | Command | What it does |
 |---|---|
+| `gw install [--rc <file>] [--print]` | Append `source <clone>/gw.sh` to your shell rc so the `gw` command exists in every shell. Idempotent; uses this clone's absolute path. Run once as `npm run gw install`. |
+| `gw doctor` | Preflight: `git`/`gh`/`node ≥18`/local `tsx`/`claude`, whether the shell is wired up, and whether you're in a workspace. Run it first when something's off. |
 | `gw init [--repo owner/name …] [--force]` | Detect the git repos sitting as siblings here (or clone the ones you name), autodetect each one's remote/base/deps/gate, write `gw.config.json`, install the slash commands. |
 | `gw start [WS-id]` | Put **every** repo on a fresh `gw/<id>` branch off `origin/<base>`, open an edit box for your prompt, `cd` into `.worktrees/<id>/`, and launch the agent. Pass a `WS-id` to **resume** that session. |
 | `gw done [--pr] [--no-check] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. |
