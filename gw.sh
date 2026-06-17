@@ -68,6 +68,11 @@ gw() {
       ;;
     CD_AND_LAUNCH)
       cd "$dir" || return 1
+      # Rename the terminal tab to the worktree/session name gw just picked (the
+      # worktree dir's basename, e.g. WS-NNNNN-slug). Tabby — and any xterm/iTerm —
+      # honor the OSC 0 escape, so parallel sessions are tellable apart at a glance.
+      # TTY-only: writing the escape into a pipe/log would just be garbage bytes.
+      if [ -t 1 ]; then printf '\033]0;%s\007' "$(basename "$dir")"; fi
       # Decode the launcher argv (e.g. "claude --permission-mode auto") and word-split
       # it. The prompt rides as ONE argv word (never eval'd) so quotes/$/!/backticks in
       # it survive untouched.
