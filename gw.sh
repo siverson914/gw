@@ -84,8 +84,11 @@ gw() {
         if [ -n "$b64" ]; then printf 'gw: prompt: %s\n' "$(printf '%s' "$b64" | base64 -d)"; fi
       elif [ -n "$b64" ]; then
         prompt="$(printf '%s' "$b64" | base64 -d)"
+        # `--` ends option parsing so a prompt starting with `-`/`---` (a markdown rule,
+        # a diff, a flag-like first line) is taken as the positional prompt, not parsed
+        # as a launcher flag. $prompt stays ONE argv word; never eval'd.
         # shellcheck disable=SC2086
-        ${launcher:-claude --permission-mode auto} "$prompt"   # $prompt is ONE argv word; never eval'd
+        ${launcher:-claude --permission-mode auto} -- "$prompt"
       else
         # shellcheck disable=SC2086
         ${launcher:-claude --permission-mode auto}
