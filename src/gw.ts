@@ -18,7 +18,10 @@
  *   gw start [prompt]   put EVERY repo on a fresh `gw/<name>` branch off origin/<base>,
  *                       then the shell cd's into <root>/.worktrees/<id> and launches
  *                       the configured agent — so every repo sits side-by-side and you
- *                       edit any of them in one session. Resumes unfinished work.
+ *                       edit any of them in one session. Resuming (an explicit WS-id, or
+ *                       a bare `gw start` from inside a session worktree) re-enters that
+ *                       session and CONTINUES the prior agent conversation by default
+ *                       (--no-continue for a clean one; --new forces a brand-new session).
  *   gw done   [--pr]    for EVERY repo you actually changed: gate -> squash-merge to
  *                       <base> + push (default), or push a branch + open a PR (--pr).
  *                       Untouched repos are skipped. All gates run before any merge,
@@ -166,16 +169,24 @@ async function cmdStart(flags: Flags): Promise<void> {
   }
 
   banner();
-  const launcher = b64(WS.launcher.join(' '));
 
-  // Resume: an existing session given as the positional arg re-enters it.
+  // Resume target: an explicit WS-id positional, else (unless --new) the session whose
+  // worktree we're standing in — so `gw start` from inside a session re-enters it rather
+  // than forking a new one. An unmatched explicit id falls through to a fresh start.
+  let resumeId: string | null = null;
   const want = flags.session ? parseId(flags.session) : null;
-  const resumeId = want ? (listSessions(WORKTREES_DIR).find(s => parseId(s) === want) ?? null) : null;
+  if (want) resumeId = listSessions(WORKTREES_DIR).find(s => parseId(s) === want) ?? null;
+  else if (!flags.new) resumeId = resolveSessionFromCwd(WORKTREES_DIR, process.cwd());
+
   if (resumeId) {
     await assertIsolatedSession(WORKTREES_DIR, resumeId, REPO_KEYS);
     log(`resuming ${resumeId}`);
     seedMcpApproval(sessionDir(WORKTREES_DIR, resumeId));
-    emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, resumeId), '', launcher);
+    // Continue the prior agent conversation in this worktree by default — the launcher's
+    // resumeArgs (claude `--continue`, which harmlessly starts fresh when there's nothing
+    // to continue) ride along. --no-continue launches a clean conversation instead.
+    const argv = flags.noContinue ? WS.launcher : [...WS.launcher, ...WS.resumeArgs];
+    emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, resumeId), '', b64(argv.join(' ')));
     return;
   }
 
@@ -189,7 +200,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   await assertIsolatedSession(WORKTREES_DIR, id, REPO_KEYS);
   log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')}`);
   seedMcpApproval(sessionDir(WORKTREES_DIR, id));
-  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(prompt) : '', launcher);
+  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(prompt) : '', b64(WS.launcher.join(' ')));
 }
 
 // Resolve which session a `done`/`abort` acts on: an explicit positional WS-id wins,
@@ -806,12 +817,14 @@ async function cmdInit(flags: Flags): Promise<void> {
 interface Flags {
   dryRun: boolean; noCheck: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
+  noContinue: boolean; new: boolean;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
 }
 function parseFlags(argv: string[]): Flags {
   const f: Flags = {
     dryRun: false, noCheck: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
+    noContinue: false, new: false,
     message: '', session: '', olderThan: '', repoFlags: [], rc: '',
   };
   for (let i = 0; i < argv.length; i++) {
@@ -822,6 +835,8 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--in-claude') f.inClaude = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
     else if (a === '--force') f.force = true;
+    else if (a === '--no-continue') f.noContinue = true;
+    else if (a === '--new') f.new = true;
     else if (a === '--echo-prompt') f.echoPrompt = true;
     else if (a === '--simulate-push-reject') f.simulatePushReject = true;
     else if (a === '--print') f.print = true;
@@ -839,7 +854,10 @@ const HELP = `gw — Grove Workspace
   gw install [--rc <file>] [--print]          wire the gw command into your shell rc
   gw doctor                                   check tools + shell wiring (run this first)
   gw init [--repo owner/name ...] [--force]   scaffold gw.config.json + slash commands
-  gw start [WS-id]                            branch every repo, launch the agent
+  gw start [WS-id] [--no-continue] [--new]    branch every repo, launch the agent
+                                              (resume continues the prior conversation;
+                                              --no-continue starts fresh, --new forces a
+                                              new session even inside a worktree)
   gw done [--pr] [--no-check] [-m msg]        gate + squash-merge each changed repo
   gw abort [WS-id]                            discard a session's work
   gw status                                   cross-repo + worktree status

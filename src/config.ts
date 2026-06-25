@@ -43,6 +43,9 @@ export interface WarnDir { dir: string; label: string }
 export interface RawConfig {
   base?: string;                       // default integration branch for repos that don't set their own
   launcher?: string;                   // agent launch command for `gw start` (default: claude --permission-mode auto)
+  resumeArgs?: string[];               // extra launcher args when RESUMING a session, to continue the prior
+                                       // conversation (default: ["--continue"], for the claude launcher). Set
+                                       // [] for a launcher with no resume concept; --no-continue skips it per-run.
   namer?: string;                      // command that titles a session from its prompt (default: claude --model haiku)
   brandColor?: string;                 // hex, for the banner + prompt box (default: Porsche orange #f26522)
   docker?: boolean;                    // write a .dockerignore into session dirs so linked deps stay out of build contexts
@@ -57,6 +60,7 @@ export interface Workspace {
   configPath: string;
   base: string;
   launcher: string[];
+  resumeArgs: string[];
   namer: string[];
   brandColor: string;
   docker: boolean;
@@ -67,6 +71,7 @@ export interface Workspace {
 }
 
 export const DEFAULT_LAUNCHER = 'claude --permission-mode auto';
+export const DEFAULT_RESUME_ARGS = ['--continue']; // claude: continue the worktree's prior conversation
 export const DEFAULT_NAMER = 'claude --model haiku';
 export const DEFAULT_BRAND = '#f26522'; // Porsche Signal Orange
 
@@ -138,6 +143,7 @@ export function loadWorkspace(start = process.cwd()): Workspace {
     configPath,
     base,
     launcher: split(raw.launcher || DEFAULT_LAUNCHER),
+    resumeArgs: raw.resumeArgs ?? DEFAULT_RESUME_ARGS,
     namer: split(raw.namer || DEFAULT_NAMER),
     brandColor: raw.brandColor || DEFAULT_BRAND,
     docker: raw.docker ?? false,

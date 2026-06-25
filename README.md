@@ -81,7 +81,7 @@ worktree, launch the agent."* `gw` adds the two halves they leave out:
 | `gw install [--rc <file>] [--print]` | Append `source <clone>/gw.sh` to your shell rc so the `gw` command exists in every shell. Idempotent; uses this clone's absolute path. Run once as `npm run gw install`. |
 | `gw doctor` | Preflight: `git`/`gh`/`node ≥18`/local `tsx`/`claude`, whether the shell is wired up, and whether you're in a workspace. Run it first when something's off. |
 | `gw init [--repo owner/name …] [--force]` | Detect the git repos sitting as siblings here (or clone the ones you name), autodetect each one's remote/base/deps/gate, write `gw.config.json`, install the slash commands. |
-| `gw start [WS-id]` | Put **every** repo on a fresh `gw/<id>` branch off `origin/<base>`, open an edit box for your prompt, `cd` into `.worktrees/<id>/`, and launch the agent. Pass a `WS-id` to **resume** that session. |
+| `gw start [WS-id] [--no-continue] [--new]` | Put **every** repo on a fresh `gw/<id>` branch off `origin/<base>`, open an edit box for your prompt, `cd` into `.worktrees/<id>/`, and launch the agent. Pass a `WS-id` — or just run it from inside a session worktree — to **resume**, which re-enters that session and **continues the prior agent conversation** by default (`--no-continue` starts a clean conversation; `--new` forces a brand-new session even from inside a worktree). |
 | `gw done [--pr] [--no-check] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. |
 | `gw status` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. |
 | `gw ready` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
@@ -113,6 +113,7 @@ gw ready                         # ✓ nothing unlanded anywhere — safe to dep
 {
   "base": "main",                                  // default integration branch
   "launcher": "claude --permission-mode auto",     // how `gw start` launches the agent
+  "resumeArgs": ["--continue"],                    // extra launcher args on resume (continue the prior convo); [] to disable
   "namer": "claude --model haiku",                 // titles each session from its prompt (fallback: plain slug)
   "brandColor": "#f26522",                         // banner + prompt-box accent
   "docker": false,                                 // write .dockerignore into session dirs (linked deps stay out of build contexts)

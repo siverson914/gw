@@ -17,7 +17,7 @@
 #            up from $PWD; set GW_ROOT yourself to override.
 
 gw() {
-  local home out kind dir b64 b64l rc tsx root prompt launcher d
+  local home out kind dir b64 b64l rc tsx root prompt launcher d line
 
   # The launcher default (`claude --permission-mode auto`) is word-split below by leaving
   # ${launcher:-...} unquoted — bash does this automatically, zsh does not. Enable it for
@@ -56,9 +56,18 @@ gw() {
     GW_OUT="$out" GW_ROOT="$root" npx --yes tsx "$home/src/gw.ts" "$@"; rc=$?
   fi
 
-  # Read the single directive (tab-separated). Done before the rc check so a partial
-  # run still can't leave a stale directive around.
-  IFS=$'\t' read -r kind dir b64 b64l < "$out" 2>/dev/null
+  # Read the single directive: four tab-separated fields (kind, dir, b64-prompt,
+  # b64-launcher), ANY of which may be empty — notably the prompt on a resume or a
+  # promptless start. Do NOT use `IFS=$'\t' read kind dir b64 b64l`: tab is an IFS
+  # *whitespace* char, so read collapses a run of tabs (an empty interior field) into
+  # one delimiter and shifts every field left — the launcher then lands in $b64 and
+  # $b64l comes back empty, so gw launches the DEFAULT agent with the launcher string
+  # as its prompt. Split by hand on literal tabs to preserve empty fields. Done before
+  # the rc check so a partial run can't leave a stale directive around.
+  IFS= read -r line < "$out" 2>/dev/null
+  kind="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  dir="${line%%$'\t'*}";  line="${line#*$'\t'}"
+  b64="${line%%$'\t'*}";  b64l="${line#*$'\t'}"
   rm -f "$out"
   if [ "$rc" -ne 0 ]; then return "$rc"; fi
 
