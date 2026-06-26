@@ -187,6 +187,57 @@ export function withRepoLandLock<T>(repoDir: string, fn: () => T | Promise<T>): 
   return withLock(path.join(repoDir, '.git', 'gw-land.lock'), fn);
 }
 
+/** True if `pid` names a live process. kill(pid, 0) sends no signal: it succeeds
+ *  for our own processes, throws EPERM for ones we can't signal (still alive), and
+ *  ESRCH only when the pid is truly gone. */
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (e: any) { return e?.code === 'EPERM'; }
+}
+
+/** Workspace-wide mutex for the test-gate PHASE of `gw done`. Only one gate runs
+ *  at a time so concurrent suites can't starve a shared test DB / Redis / sandbox
+ *  pool into OOM-kills (which surface as the cryptic "gate failed (exit null)").
+ *
+ *  A gate legitimately runs for many minutes, longer than any fixed mtime stale
+ *  threshold, so plain `withLock` would wrongly steal a HEALTHY gate. Instead the
+ *  holder heartbeats the lock's mtime while it works, and a waiter steals only when
+ *  the holder's pid is dead OR its heartbeat went stale (`staleMs`) — i.e. it
+ *  crashed / was OOM-killed / SIGKILLed without releasing. `onWait` fires once, the
+ *  first time we have to queue behind another gate, so a blocked run doesn't look
+ *  hung. The wait is otherwise unbounded up to `maxWaitMs`. */
+export async function withGateLock<T>(
+  lockDir: string,
+  fn: () => T | Promise<T>,
+  opts: { onWait?: () => void; staleMs?: number; maxWaitMs?: number } = {},
+): Promise<T> {
+  const staleMs = opts.staleMs ?? 90_000;          // > heartbeat (30s); ~3 missed beats = dead
+  const maxWaitMs = opts.maxWaitMs ?? 60 * 60_000; // backstop so we never hang truly forever
+  const start = Date.now();
+  let warned = false;
+  for (;;) {
+    try { fs.mkdirSync(lockDir); break; }           // atomic create == acquire (NOT recursive)
+    catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e;
+      let pid = 0, age = Infinity;
+      try { pid = parseInt(fs.readFileSync(path.join(lockDir, 'pid'), 'utf-8'), 10) || 0; } catch { /* not written yet */ }
+      try { age = Date.now() - fs.statSync(lockDir).mtimeMs; } catch { continue; /* vanished — retry */ }
+      if ((pid && !pidAlive(pid)) || age > staleMs) {
+        try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch { /* race with another waiter */ }
+        continue;
+      }
+      if (!warned) { opts.onWait?.(); warned = true; }
+      if (Date.now() - start > maxWaitMs) throw new Error(`gave up waiting for the gw gate lock after ${Math.round(maxWaitMs / 60_000)}m (${lockDir})`);
+      await sleep(250);
+    }
+  }
+  try { fs.writeFileSync(path.join(lockDir, 'pid'), String(process.pid)); } catch { /* best-effort */ }
+  const beat = setInterval(() => { try { const t = new Date(); fs.utimesSync(lockDir, t, t); } catch { /* gone */ } }, 30_000);
+  beat.unref?.();
+  try { return await fn(); }
+  finally { clearInterval(beat); try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch { /* already gone */ } }
+}
+
 // ── ephemeral land worktrees ─────────────────────────────────────────────────
 // A land builds its squash commit in a DISPOSABLE detached worktree off
 // origin/<base>, never in the shared canonical checkout — so that checkout's

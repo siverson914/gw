@@ -25,7 +25,10 @@
  *   gw done   [--pr]    for EVERY repo you actually changed: gate -> squash-merge to
  *                       <base> + push (default), or push a branch + open a PR (--pr).
  *                       Untouched repos are skipped. All gates run before any merge,
- *                       so one red gate lands nothing.
+ *                       so one red gate lands nothing. Only one gate runs at a time
+ *                       per workspace (a lock serializes concurrent `gw done`s so
+ *                       their suites don't starve shared test resources); --no-lock
+ *                       opts out.
  *   gw abort            discard every repo's branch work; <base> is never touched.
  *   gw status           one-glance check of EVERY repo + worktree: branch,
  *                       uncommitted/untracked, ahead/behind upstream.
@@ -52,7 +55,7 @@ import {
   run, git, gitOut, slugify, smartSlug, allocateId, parseId,
   ensureSession, removeSession, listSessions, resolveSessionFromCwd,
   assertIsolatedSession, isSessionWorktree, type RepoKey,
-  sessionDir, sessionRepoDir, withRepoLandLock, stagedLinkPaths,
+  sessionDir, sessionRepoDir, withRepoLandLock, withGateLock, stagedLinkPaths,
   landTmpRoot, landTmpDir, sweepLandTmp, lastActiveLabel,
 } from './lib/worktrees.js';
 import { promptBox } from './lib/prompt-box.js';
@@ -269,31 +272,40 @@ async function cmdDone(flags: Flags): Promise<void> {
   log(`${session} changed: ${pending.map((p) => p.repo).join(', ')}`);
 
   // 2. Gate ALL changed repos first — one red gate stops everything, nothing merged.
+  // The whole gate phase runs under a workspace-wide lock (unless --no-lock) so only
+  // one `gw done` exercises the shared test resources (DB/Redis/sandbox) at a time;
+  // concurrent suites used to starve each other into OOM-kills ("gate failed (exit
+  // null)"). Landing is NOT locked — it's seconds and already concurrency-safe.
   if (!flags.noCheck) {
-    for (const p of pending) {
-      const gate = REPOS[p.repo].gate;
-      if (!gate) continue;
-      log(`[${p.repo}] gate: ${gate.join(' ')} ...`);
-      const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: 12 * 60_000, onStdout: (s) => process.stderr.write(s) });
-      if (g.code !== 0) die(`[${p.repo}] gate failed (exit ${g.code}). Fix and re-run, or skip with --no-check. Nothing was merged.`);
-      log(`[${p.repo}] gate passed.`);
-    }
-
-    // Optional session-level gate: catches cross-repo drift a per-repo gate misses
-    // (e.g. a generated-doc `--check`). Runs from the configured repo's worktree only
-    // when that repo itself was NOT changed (its own gate already covers it).
-    const sg = WS.sessionGate;
-    if (sg && !pending.some((p) => p.repo === sg.repo)) {
-      const wt = sessionRepoDir(WORKTREES_DIR, session, sg.repo);
-      if (fs.existsSync(wt)) {
-        for (const cmd of sg.commands) {
-          log(`[${sg.repo}] session gate: ${cmd.join(' ')} ...`);
-          const d = await run(cmd[0], cmd.slice(1), { cwd: wt, timeoutMs: 5 * 60_000, onStdout: (s) => process.stderr.write(s) });
-          if (d.code !== 0) die(`session gate failed (${cmd.join(' ')}). Fix, commit any regenerated files, then re-run gw done. Nothing was merged.`);
-        }
-        log(`[${sg.repo}] session gate passed.`);
+    const runGates = async () => {
+      for (const p of pending) {
+        const gate = REPOS[p.repo].gate;
+        if (!gate) continue;
+        log(`[${p.repo}] gate: ${gate.join(' ')} ...`);
+        const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: 12 * 60_000, onStdout: (s) => process.stderr.write(s) });
+        if (g.code !== 0) die(`[${p.repo}] gate failed (exit ${g.code}). Fix and re-run, or skip with --no-check. Nothing was merged.`);
+        log(`[${p.repo}] gate passed.`);
       }
-    }
+
+      // Optional session-level gate: catches cross-repo drift a per-repo gate misses
+      // (e.g. a generated-doc `--check`). Runs from the configured repo's worktree only
+      // when that repo itself was NOT changed (its own gate already covers it).
+      const sg = WS.sessionGate;
+      if (sg && !pending.some((p) => p.repo === sg.repo)) {
+        const wt = sessionRepoDir(WORKTREES_DIR, session, sg.repo);
+        if (fs.existsSync(wt)) {
+          for (const cmd of sg.commands) {
+            log(`[${sg.repo}] session gate: ${cmd.join(' ')} ...`);
+            const d = await run(cmd[0], cmd.slice(1), { cwd: wt, timeoutMs: 5 * 60_000, onStdout: (s) => process.stderr.write(s) });
+            if (d.code !== 0) die(`session gate failed (${cmd.join(' ')}). Fix, commit any regenerated files, then re-run gw done. Nothing was merged.`);
+          }
+          log(`[${sg.repo}] session gate passed.`);
+        }
+      }
+    };
+    if (flags.noLock) await runGates();
+    else await withGateLock(path.join(WORKTREES_DIR, 'gw-gate.lock'), runGates,
+      { onWait: () => log('another gw gate is running — waiting for it to finish before starting this one (use --no-lock to skip)...') });
   }
 
   if (flags.dryRun) {
@@ -883,7 +895,7 @@ async function cmdInit(flags: Flags): Promise<void> {
 // ── flags + dispatch ─────────────────────────────────────────────────────────
 
 interface Flags {
-  dryRun: boolean; noCheck: boolean; pr: boolean; inClaude: boolean; yes: boolean;
+  dryRun: boolean; noCheck: boolean; noLock: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
@@ -891,7 +903,7 @@ interface Flags {
 }
 function parseFlags(argv: string[]): Flags {
   const f: Flags = {
-    dryRun: false, noCheck: false, pr: false, inClaude: false, yes: false,
+    dryRun: false, noCheck: false, noLock: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false,
     message: '', session: '', olderThan: '', repoFlags: [], rc: '', unknown: [],
@@ -900,6 +912,7 @@ function parseFlags(argv: string[]): Flags {
     const a = argv[i];
     if (a === '--dry-run') f.dryRun = true;
     else if (a === '--no-check') f.noCheck = true;
+    else if (a === '--no-lock') f.noLock = true;
     else if (a === '--pr') f.pr = true;
     else if (a === '--in-claude') f.inClaude = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
@@ -930,7 +943,9 @@ const HELP = `gw — Grove Workspace
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree)
-  gw done [--pr] [--no-check] [-m msg]        gate + squash-merge each changed repo
+  gw done [--pr] [--no-check] [--no-lock]     gate + squash-merge each changed repo
+          [-m msg]                            (one gate at a time per workspace;
+                                              --no-lock runs concurrently anyway)
   gw done --show                              preview per-repo diff to be landed (read-only)
   gw abort [WT-id]                            discard a session's work
   gw status                                   cross-repo + worktree status
