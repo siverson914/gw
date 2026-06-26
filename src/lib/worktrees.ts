@@ -1,7 +1,7 @@
 /**
  * Shared worktree management for `gw` (Grove Workspace). gw runs many units of work
  * in parallel, each in its OWN namespaced worktree set across every configured repo,
- * identified by a sortable auto-numbered id (`WS-NNNNN`, optionally with a `-<slug>`
+ * identified by a sortable auto-numbered id (`WT-NNN`, optionally with a `-<slug>`
  * suffix). This module owns: the work-unit numberer, worktree create/remove,
  * cwd→session resolution, and the locks that make concurrent landing/numbering safe.
  *
@@ -114,29 +114,34 @@ export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec
     const r = await exec(namer[0], [...namer.slice(1), '-p', ask], { timeoutMs });
     const out = r.stdout.trim();
     const wordCount = out.split(/\s+/).filter(Boolean).length;
-    // Accept only what looks like an actual title: one line, 2-6 words. Anything
-    // else (multi-line prose, a lone word, an apology) is junk — use the fallback.
-    if (r.code === 0 && out && !out.includes('\n') && wordCount >= 2 && wordCount <= 6) {
+    // Accept only what looks like an actual title: one line, 1-6 words. Anything
+    // else (multi-line prose, an apology) is junk — use the fallback. A clean
+    // single-word title (e.g. "authentication") is fine; don't reject it just for
+    // lacking a dash, which used to force the uglier full-prompt fallback.
+    if (r.code === 0 && out && !out.includes('\n') && wordCount >= 1 && wordCount <= 6) {
       const s = slugify(out);
-      if (s.includes('-')) return s;
+      if (s) return s;
     }
   } catch { /* fall through to the plain slug */ }
   return slugify(prompt);
 }
 
-const ID_PREFIX = 'WS';
-const ID_WIDTH = 5;
+const ID_PREFIX = 'WT';   // current prefix for NEW ids ("work tree")
+const ID_WIDTH = 3;       // zero-pad new ids to 3 (grows to 4+ naturally past 999)
 // One shared, durable counter at the workspace root (not inside .worktrees/, so
 // per-session cleanup never resets it; the root is not a git repo, so it's never
 // committed). Locked so concurrent `gw start`s never collide on a number.
 function seqFile(): string { return path.join(ws.root, '.gw-seq'); }
 
+// Accept BOTH the current `WT-` and the legacy `WS-` prefix so sessions created before
+// the rename stay resolvable/landable; preserve whichever prefix actually matched (do
+// NOT normalize WS→WT, or an old worktree/branch would no longer be found by its id).
 export function parseId(name: string): string | null {
-  const m = name.match(new RegExp(`^${ID_PREFIX}-(\\d{${ID_WIDTH},})`));
-  return m ? `${ID_PREFIX}-${m[1]}` : null;
+  const m = name.match(/^(WS|WT)-(\d{3,})/);
+  return m ? `${m[1]}-${m[2]}` : null;
 }
 
-/** Allocate the next `WS-NNNNN` id, appending `-<slug>` when a slug is given. The
+/** Allocate the next `WT-NNN` id, appending `-<slug>` when a slug is given. The
  *  read-increment-write is wrapped in a lock so it's safe under concurrency. */
 export async function allocateId(slug?: string): Promise<string> {
   const file = seqFile();

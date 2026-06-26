@@ -18,5 +18,5 @@ It checks and prints one verdict:
 **Exit 0 / `READY`** — report that everything is landed and synced; deploying is safe. Do NOT deploy to prod yourself — that stays user-initiated.
 
 **Exit 1 / `NOT done-done`** — this is a report, not an error; do NOT just re-run it. Relay the printed list and help resolve each item:
-- An **unlanded session** → finish it (`gw start <WS-id>` then `/done` inside it) or discard it (`gw abort <WS-id>`) — ask the user which, if it isn't this session.
+- An **unlanded session** → finish it (`gw start <WT-id>` then `/done` inside it) or discard it (`gw abort <WT-id>`) — ask the user which, if it isn't this session.
 - A **canonical checkout** that is dirty/diverged/on another branch → it holds work outside the gw flow; show the user `git -C <repo> status` and decide together (commit, stash, or drop) before deploying.

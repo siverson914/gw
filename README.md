@@ -1,25 +1,20 @@
 # gw — Grove Workspace
 
-**Parallel, isolated agent sessions across many git repos — with a one-command, can't-lose-work land.**
+**Give each task its own set of git worktrees — one per repo, branched together — so a coding agent can make one coherent change across several repos and land it everywhere with a single, can't-lose-work command.**
 
 ![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a) ![license](https://img.shields.io/badge/license-MIT-blue) ![status](https://img.shields.io/badge/agent-Claude%20by%20default-f26522)
 
-Coding agents are great in one repo. Real changes span three. `gw` gives every unit of
-work its own set of git worktrees — **one per repo, branched together** off
-`origin/<base>` — so your agent can edit backend + web + cli in a single coherent
-session. When you're done, **one command** gates, squash-merges, and pushes every repo
-you actually touched. Run several sessions side-by-side; your live checkouts are never
-edited in place, only merged into.
+Coding agents are excellent inside one repo. Real changes span three — API + web + worker. The moment a task crosses repos you're back to juggling branches, keeping three checkouts in lockstep, and hoping you didn't land two of the three. `gw` removes that: every unit of work gets a parallel mirror of your workspace, with **every repo on a fresh branch off `origin/<base>`**. The agent edits across all of them in one session; `gw done` gates, squash-merges, and pushes only the repos that actually changed — atomically per repo, idempotent, and built so a failure can't strand your work.
 
 ```
 gw install  →   wire the gw command into your shell (one time, idempotent)
 gw init     →   detect your repos, write config, install slash commands
-gw start    →   type a prompt; gw branches every repo and launches your agent
+gw start    →   type a task; gw branches every repo and launches your agent
 /done       →   gate + squash-merge + push — only the repos you changed
 gw ready    →   "is anything unlanded? safe to deploy?" — one verdict
 ```
 
-No worktree juggling. No "which branch was I on?" No half-landed cross-repo change.
+Your live checkouts are **only ever merged into, never edited in place** — so several sessions run side by side without colliding.
 
 ---
 
@@ -32,9 +27,7 @@ npm run gw install                              # appends `source <this-clone>/g
 exec $SHELL                                     # reload — then `gw doctor` to verify
 ```
 
-`gw install` writes the **absolute path of this clone** into your `~/.bashrc` or
-`~/.zshrc` (idempotent; `--rc <file>` to target one, `--print` to just show the line).
-`gw doctor` checks tools + shell wiring and tells you what's missing.
+`gw install` writes the **absolute path of this clone** into your `~/.bashrc` or `~/.zshrc` (idempotent; `--rc <file>` to target one, `--print` to just show the line). `gw doctor` checks tools + shell wiring and tells you what's missing.
 
 Point it at the directory that holds your repos as siblings:
 
@@ -49,30 +42,56 @@ gw init          # autodetects repos, remotes, bases, deps & gates → gw.config
 gw start         # type your task → you're now in an isolated, multi-repo session
 ```
 
-…edit anything across all repos in the agent, then:
+…the agent edits across all repos, runs tests, iterates, then:
 
 ```
 /done            # inside the agent: gate every changed repo, squash-merge, push
 ```
 
-That's it. `gw status` shows where everything stands; `gw ready` tells you when it's safe to ship.
+`gw status` shows where everything stands; `gw ready` tells you when it's safe to ship.
 
 ---
 
 ## Why gw
 
-Worktree managers (grove, gwq, …) and agent-in-worktree runners stop at *"make a
-worktree, launch the agent."* `gw` adds the two halves they leave out:
+Worktree managers (grove, gwq, …) and agent-in-worktree runners stop at *"make a worktree, launch the agent."* `gw` adds the two halves they leave out:
 
-- **One session spans many repos.** A coordinated change to API + client + worker happens
-  together, branched together, landed together — not as three disconnected PRs you have
-  to keep in lockstep by hand.
-- **A real land workflow.** `done` runs each repo's gate, squash-merges to its base, and
-  pushes — **all gates first, so one red gate lands nothing.** It's idempotent and lands
-  in a throwaway worktree off `origin/<base>`, so a dirty checkout can't block it and a
-  failed land strands nothing. Re-run and it picks up exactly what's left.
-- **A deploy-readiness verdict.** `gw ready` answers the question you actually care about:
-  *is anything, in any session, not yet landed — and do my checkouts match `origin`?*
+- **One session spans many repos.** A coordinated change to API + client + worker is branched together and landed together — not three disconnected PRs you keep in lockstep by hand.
+- **A real land workflow.** `done` runs each repo's gate, squash-merges to its base, and pushes — **all gates first, so one red gate lands nothing.** It lands in a throwaway worktree off `origin/<base>`, so a dirty checkout can't block it and a failed land strands nothing. It's idempotent: re-run and it picks up exactly what's left.
+- **A deploy-readiness verdict.** `gw ready` answers the question you actually care about: *is anything, in any session, not yet landed — and do my checkouts match `origin`?*
+
+## A day with gw
+
+```text
+gw start                         # "add per-clip view counts (api + web + worker)"
+  → WT-007 across all three repos, agent launched in .worktrees/WT-007-per-clip-view-counts/
+  …agent edits server/, web/, worker/ together, runs things, iterates…
+/done
+  [server]  gate: npm run test:fast … passed
+  [web]     gate: npm run test:fast … passed
+  [worker]  gate: pytest -q … passed
+  merged + pushed: server, web, worker      # one coherent change, three repos, one step
+
+# meanwhile a second session ran in parallel, in its own worktree set:
+gw status                        # see every session + repo at a glance
+gw ready                         # ✓ nothing unlanded anywhere — safe to deploy
+```
+
+Each session is named from your prompt (`WT-007-per-clip-view-counts`) and that name is set as the terminal tab title, so parallel sessions are tellable apart at a glance. Finishing a session resets the tab back to the project name.
+
+## Commit messages that read well
+
+`/done` composes a real squash message instead of a bare id. It shows you the net per-repo diff (`gw done --show`), then writes a Conventional-Commits message — a tight `type(scope): summary` subject that reads well in `git log --oneline`, and a body with the detail you get on open:
+
+```
+fix(server): debounce clip-count writes under burst load
+
+- batch increments in a 250ms window instead of one write per view
+- add a regression test for the burst path
+Repos: server, worker
+```
+
+Run `gw done` directly (no agent) and it still builds a structured message from the branch's own commits rather than just the session id. Pass `-m` to override.
 
 ## Commands
 
@@ -81,31 +100,31 @@ worktree, launch the agent."* `gw` adds the two halves they leave out:
 | `gw install [--rc <file>] [--print]` | Append `source <clone>/gw.sh` to your shell rc so the `gw` command exists in every shell. Idempotent; uses this clone's absolute path. Run once as `npm run gw install`. |
 | `gw doctor` | Preflight: `git`/`gh`/`node ≥18`/local `tsx`/`claude`, whether the shell is wired up, and whether you're in a workspace. Run it first when something's off. |
 | `gw init [--repo owner/name …] [--force]` | Detect the git repos sitting as siblings here (or clone the ones you name), autodetect each one's remote/base/deps/gate, write `gw.config.json`, install the slash commands. |
-| `gw start [WS-id] [--no-continue] [--new]` | Put **every** repo on a fresh `gw/<id>` branch off `origin/<base>`, open an edit box for your prompt, `cd` into `.worktrees/<id>/`, and launch the agent. Pass a `WS-id` — or just run it from inside a session worktree — to **resume**, which re-enters that session and **continues the prior agent conversation** by default (`--no-continue` starts a clean conversation; `--new` forces a brand-new session even from inside a worktree). |
-| `gw done [--pr] [--no-check] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. |
+| `gw start [WT-id] [--no-continue] [--new]` | Put **every** repo on a fresh `gw/<id>` branch off `origin/<base>`, open an edit box for your prompt, `cd` into `.worktrees/<id>/`, and launch the agent. Pass a `WT-id` — or just run it from inside a session worktree — to **resume**, which re-enters that session and **continues the prior agent conversation** by default (`--no-continue` starts a clean conversation; `--new` forces a brand-new session even from inside a worktree). |
+| `gw done [--pr] [--no-check] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. Without `-m`, the message is composed from the branch's own commits (the `/done` skill writes a richer one). |
+| `gw done --show` | Read-only: print the net per-repo diff that would land (vs `origin/<base>`), staging/gating/merging nothing. Used by `/done` to compose the commit message before landing. |
 | `gw status` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. |
 | `gw ready` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
-| `gw abort [WS-id]` | Discard a session's branch work in every repo. Base branches are never touched. |
+| `gw abort [WT-id]` | Discard a session's branch work in every repo. Base branches are never touched. |
 | `gw prune [--older-than 2d] [--dry-run]` | Remove fully-landed, idle sessions. |
 | `gw setup` | (Re)install the `/done`, `/abort`, `/donedone` slash commands and sanity-check tools/repos. |
 | `/done`, `/abort`, `/donedone` | The same as `gw done` / `abort` / `ready`, but run **inside the agent** — so a red gate or conflict gets fixed and explained live, then you re-run. |
 
-## A day with gw
+Legacy `WS-` session ids created before the `WT-` rename are still resolvable and landable.
 
-```text
-gw start                         # "add per-clip view counts (api + web + worker)"
-  → gw/WS-00007 across all three repos, agent launched in .worktrees/WS-00007/
-  …agent edits server/, web/, worker/ together, runs things, iterates…
-/done
-  [server]  gate: npm run test:fast … passed
-  [web]     gate: npm run test:fast … passed
-  [worker]  gate: pytest -q … passed
-  merged + pushed: server, web, worker      # one coherent change, three repos, one step
+## Safety — gw is built so you can't lose work
 
-# meanwhile, a second session was running in parallel:
-gw status                        # see every session + repo at a glance
-gw ready                         # ✓ nothing unlanded anywhere — safe to deploy
-```
+- **Failures never lose work.** Landing happens in a disposable worktree off `origin/<base>`: a dirty checkout can't block it, a failed land strands nothing, and `gw done` is idempotent — re-run and it finishes the rest.
+- **Sessions are strictly isolated.** gw refuses to stage/commit/land in any path that isn't a genuine `gw/<id>` linked worktree, so edits can never hit a canonical checkout.
+- **Catches the "wrong copy" mistake.** If a repo's canonical checkout has uncommitted edits while its session worktree is clean, `gw done` warns loudly — those edits won't silently get left behind. (For agents that support hooks, you can also add a `PreToolUse` hook that *blocks* canonical-path edits outright during a session.)
+- **Canonical checkouts advance — or say why they didn't.** After a land, gw fast-forwards each shared checkout to `origin/<base>` so the next `gw start` (and any deploy) sees fresh code. It tests **content-level** dirtiness (not just `git status`, which a mtime-only-touched file can trip), so a checkout doesn't get stuck behind origin; when it genuinely can't advance it warns that deploys from there would ship stale code. (See [docs/postmortem-stale-deploy.md](docs/postmortem-stale-deploy.md).)
+- **`gw ready` only ever fast-forwards** (`--ff-only`) a clean checkout — it can never clobber local work.
+
+## How it works (the one bit of plumbing)
+
+A script can't change your shell's directory or hand the terminal to an interactive agent — only the shell can (this is why `nvm`, `zoxide`, `direnv` are shell functions). So `gw` is a tiny shell function (`gw.sh`) that calls the real logic in `src/gw.ts`; the script does every git/gh/gate operation, then writes one directive line ("cd here", or "cd here and launch the agent with this prompt") to a temp file the function reads and acts on. Your typed prompt rides base64-encoded so quotes/`$`/`!`/backticks survive untouched, and it's never `eval`'d.
+
+It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` — a mirror of your real root, so every repo sits side-by-side.
 
 ## Config (`gw.config.json`)
 
@@ -134,48 +153,13 @@ gw ready                         # ✓ nothing unlanded anywhere — safe to dep
 }
 ```
 
-- **`linkPaths`** are symlinked into every worktree so gates can run without re-installing
-  deps. **They must stay gitignored** — gw will never commit *or delete* a linkPath, and
-  warns if one is tracked (a `.env` belongs here, never in git).
-- **`sessionGate`**: `{ "repo": "server", "commands": [["npx","tsx","scripts/build-docs.ts","--check"]] }`
-  — runs from that repo's worktree to catch cross-repo drift (e.g. a generated file) a
-  per-repo gate would miss. Skipped when that repo itself changed (its own gate covers it).
-- **`nmScope`**: set only for npm/yarn **workspace** monorepos where `node_modules/<scope>/*`
-  symlinks back into the repo; gw rebuilds those links per-worktree so a worktree's edits
-  to a local package are seen by its own tests.
-
-## Safety — gw is built so you can't lose work
-
-- **Failures never lose work.** Landing happens in a disposable worktree off
-  `origin/<base>`: a dirty checkout can't block it, a failed land strands nothing, and
-  `gw done` is idempotent — re-run and it finishes the rest.
-- **Sessions are strictly isolated.** gw refuses to stage/commit/land in any path that
-  isn't a genuine `gw/<id>` linked worktree, so edits can never hit a canonical checkout.
-- **Catches the "wrong copy" mistake.** If a repo's canonical checkout has uncommitted
-  edits while its session worktree is clean, `gw done` warns loudly — those edits won't
-  silently get left behind. (For agents that support hooks, you can also add a
-  `PreToolUse` hook that *blocks* canonical-path edits outright during a session.)
-- **`gw ready` only ever fast-forwards** (`--ff-only`) a clean checkout — it can never
-  clobber local work.
-
-## How it works (the one bit of plumbing)
-
-A script can't change your shell's directory or hand the terminal to an interactive agent
-— only the shell can (this is why `nvm`, `zoxide`, `direnv` are shell functions). So `gw`
-is a tiny shell function (`gw.sh`) that calls the real logic in `src/gw.ts`; the script
-does every git/gh/gate operation, then writes one directive line ("cd here", or "cd here
-and launch the agent with this prompt") to a temp file the function reads and acts on.
-Your typed prompt rides base64-encoded so quotes/`$`/`!`/backticks survive untouched, and
-it's never `eval`'d.
-
-It keeps one worktree set per session under `<root>/.worktrees/<WS-id>/<repo>` — a mirror
-of your real root, so every repo sits side-by-side.
+- **`linkPaths`** are symlinked into every worktree so gates can run without re-installing deps. **They must stay gitignored** — gw will never commit *or delete* a linkPath, and warns if one is tracked (a `.env` belongs here, never in git).
+- **`sessionGate`**: `{ "repo": "server", "commands": [["npx","tsx","scripts/build-docs.ts","--check"]] }` — runs from that repo's worktree to catch cross-repo drift (e.g. a generated file) a per-repo gate would miss. Skipped when that repo itself changed (its own gate covers it).
+- **`nmScope`**: set only for npm/yarn **workspace** monorepos where `node_modules/<scope>/*` symlinks back into the repo; gw rebuilds those links per-worktree so a worktree's edits to a local package are seen by its own tests.
 
 ## Requirements
 
-`git`, `gh` (for `--pr` and `init --repo`), `node` ≥ 18, and `tsx` (installed via
-`npm install`). The default `launcher`/`namer` use the `claude` CLI; point them at any
-other agent in `gw.config.json`.
+`git`, `gh` (for `--pr` and `init --repo`), `node` ≥ 18, and `tsx` (installed via `npm install`). The default `launcher`/`namer` use the `claude` CLI; point them at any other agent in `gw.config.json`.
 
 ## License
 

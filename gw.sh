@@ -74,11 +74,14 @@ gw() {
   case "$kind" in
     CD)
       cd "$dir" || return 1
+      # done/abort land us back at the workspace root — reset the tab from the now-gone
+      # session name to the project name so a finished tab doesn't read as still-active.
+      if [ -t 1 ]; then printf '\033]0;%s\007' "$(basename "$dir")"; fi
       ;;
     CD_AND_LAUNCH)
       cd "$dir" || return 1
       # Rename the terminal tab to the worktree/session name gw just picked (the
-      # worktree dir's basename, e.g. WS-NNNNN-slug). Tabby — and any xterm/iTerm —
+      # worktree dir's basename, e.g. WT-NNN-slug). Tabby — and any xterm/iTerm —
       # honor the OSC 0 escape, so parallel sessions are tellable apart at a glance.
       # TTY-only: writing the escape into a pipe/log would just be garbage bytes.
       if [ -t 1 ]; then printf '\033]0;%s\007' "$(basename "$dir")"; fi

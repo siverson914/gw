@@ -18,7 +18,7 @@
  *   gw start [prompt]   put EVERY repo on a fresh `gw/<name>` branch off origin/<base>,
  *                       then the shell cd's into <root>/.worktrees/<id> and launches
  *                       the configured agent — so every repo sits side-by-side and you
- *                       edit any of them in one session. Resuming (an explicit WS-id, or
+ *                       edit any of them in one session. Resuming (an explicit session-id, or
  *                       a bare `gw start` from inside a session worktree) re-enters that
  *                       session and CONTINUES the prior agent conversation by default
  *                       (--no-continue for a clean one; --new forces a brand-new session).
@@ -170,7 +170,7 @@ async function cmdStart(flags: Flags): Promise<void> {
 
   banner();
 
-  // Resume target: an explicit WS-id positional, else (unless --new) the session whose
+  // Resume target: an explicit session-id positional, else (unless --new) the session whose
   // worktree we're standing in — so `gw start` from inside a session re-enters it rather
   // than forking a new one. An unmatched explicit id falls through to a fresh start.
   let resumeId: string | null = null;
@@ -203,7 +203,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(prompt) : '', b64(WS.launcher.join(' ')));
 }
 
-// Resolve which session a `done`/`abort` acts on: an explicit positional WS-id wins,
+// Resolve which session a `done`/`abort` acts on: an explicit positional session-id wins,
 // else infer from cwd (the agent runs inside the session dir). null = can't tell.
 function resolveSession(flags: Flags): string | null {
   if (flags.session) { const id = parseId(flags.session); if (id) return listSessions(WORKTREES_DIR).find(s => parseId(s) === id) ?? flags.session; }
@@ -216,8 +216,12 @@ interface Pending { repo: RepoKey; wt: string; branch: string; name: string; }
 
 async function cmdDone(flags: Flags): Promise<void> {
   const session = resolveSession(flags);
-  if (!session) die('no gw session: run /done from inside a session worktree, or pass the WS id (gw done WS-NNNNN).');
+  if (!session) die('no gw session: run /done from inside a session worktree, or pass the session id (gw done WT-NNN).');
   const branch = `gw/${session}`;
+
+  // `--show`: read-only preview of what would land, per repo, so the /done skill can
+  // compose a real commit message. Nothing is staged permanently, gated, or merged.
+  if (flags.show) return showSessionDiff(session, branch);
 
   // Reap any ephemeral land worktrees a crashed `gw done` left behind, in every repo.
   for (const repo of REPO_KEYS) await sweepLandTmp(REPOS[repo].dir);
@@ -310,23 +314,70 @@ async function cmdDone(flags: Flags): Promise<void> {
   return finishCd(flags);
 }
 
+// Read-only: print, per changed repo, the net diff `gw done` would land (committed
+// work plus any uncommitted edits, vs origin/<base>) so the /done skill can compose a
+// descriptive commit message before re-running with `-m`. Stages nothing permanently,
+// gates nothing, lands nothing. stdout = diffs (machine-readable), stderr = notes.
+async function showSessionDiff(session: string, branch: string): Promise<void> {
+  let any = false;
+  for (const repo of REPO_KEYS) {
+    const wt = sessionRepoDir(WORKTREES_DIR, session, repo);
+    if (!fs.existsSync(path.join(wt, '.git'))) continue;
+    if (!(await isSessionWorktree(wt, REPOS[repo].dir, branch))) continue;
+    const base = REPOS[repo].base;
+    await git(wt, ['fetch', 'origin', base]); // refresh origin/<base> so the diff is current
+    // Intent-to-add (-N) makes new untracked files show up in the diff; the mixed reset
+    // afterward clears the index entries again, leaving the working tree untouched.
+    await git(wt, ['add', '-AN']);
+    const stat = await gitOut(wt, ['diff', '--stat', `origin/${base}`]);
+    const full = await gitOut(wt, ['diff', `origin/${base}`]);
+    await git(wt, ['reset', '-q']);
+    if (!stat) continue;
+    any = true;
+    process.stdout.write(`\n=== ${repo} (base ${base}) ===\n${stat}\n\n${full}\n`);
+  }
+  if (!any) log(`no changes to land in ${session}.`);
+}
+
+// Build the squash message when no -m was passed — i.e. a manual `gw done`, NOT the
+// /done skill (which composes a real, descriptive message). Prefer the branch's own
+// non-`wip:` commit subjects (subject = first, body = the rest as bullets); if the
+// branch is all wip commits, summarize the diff so the message is still scannable
+// rather than a bare session id.
+async function fallbackMessage(wt: string, base: string, name: string): Promise<string> {
+  const subjects = (await gitOut(wt, ['log', `origin/${base}..HEAD`, '--format=%s', '--reverse']))
+    .split('\n').map((s) => s.trim()).filter(Boolean);
+  const meaningful = [...new Set(subjects.filter((s) => !s.startsWith('wip:')))];
+  if (meaningful.length === 1) return meaningful[0];
+  if (meaningful.length > 1) return `${meaningful[0]}\n\n${meaningful.slice(1).map((s) => `- ${s}`).join('\n')}`;
+
+  const files = (await gitOut(wt, ['diff', '--name-only', `origin/${base}..HEAD`])).split('\n').filter(Boolean);
+  if (!files.length) return name;
+  const dirs = [...new Set(files.map((f) => f.split('/')[0]))];
+  const where = dirs.length === 1 ? dirs[0] : `${dirs.length} areas`;
+  const subject = `update ${files.length} file${files.length === 1 ? '' : 's'} in ${where} (${name})`;
+  const shown = files.slice(0, 20).map((f) => `- ${f}`).join('\n');
+  return `${subject}\n\n${shown}${files.length > 20 ? `\n- …and ${files.length - 20} more` : ''}`;
+}
+
 // Land ONE repo: build a squash commit in a disposable worktree off origin/<base> and
 // push it (default), or push a namespaced branch + open a PR (--pr). On any failure
 // the session is left intact and the reason is returned.
 async function landRepo(p: Pending, flags: Flags): Promise<{ ok: boolean; reason?: string }> {
   const mainDir = REPOS[p.repo].dir;
   const base = REPOS[p.repo].base;
-  let msg = flags.message;
-  if (!msg) {
-    const subj = (await gitOut(p.wt, ['log', `origin/${base}..HEAD`, '--format=%s', '--reverse'])).split('\n')[0] || '';
-    msg = subj && !subj.startsWith('wip:') ? subj : p.name;
-  }
+  const msg = flags.message || await fallbackMessage(p.wt, base, p.name);
 
   if (flags.pr) {
     const remote = `gw/${await ghHandle(mainDir)}/${p.name}`;
     if ((await git(p.wt, ['push', '-f', 'origin', `HEAD:refs/heads/${remote}`])).code !== 0) return { ok: false, reason: `push to origin/${remote} failed` };
     if (!REPOS[p.repo].slug) return { ok: false, reason: `no "slug" configured for ${p.repo} — needed to open a PR (add it to ${CONFIG_NAME})` };
-    const pr = await run('gh', ['pr', 'create', '--repo', REPOS[p.repo].slug, '--head', remote, '--base', base, '--title', msg, '--body', `Opened by \`gw\`. Gate: ${flags.noCheck ? 'skipped' : 'passed'}.`], { cwd: mainDir });
+    // Split the (possibly multi-line) message: first line is the PR title, the rest is
+    // the body — otherwise a descriptive body lands verbatim in the PR title.
+    const [subject, ...bodyLines] = msg.split('\n');
+    const body = bodyLines.join('\n').trim();
+    const prBody = `${body ? `${body}\n\n` : ''}Opened by \`gw\`. Gate: ${flags.noCheck ? 'skipped' : 'passed'}.`;
+    const pr = await run('gh', ['pr', 'create', '--repo', REPOS[p.repo].slug, '--head', remote, '--base', base, '--title', subject, '--body', prBody], { cwd: mainDir });
     process.stdout.write(pr.stdout); if (pr.stderr) process.stderr.write(pr.stderr);
     return pr.code === 0 ? { ok: true } : { ok: false, reason: 'gh pr create failed' };
   }
@@ -379,15 +430,32 @@ async function pushWithRetry(tmp: string, flags: Flags, base: string): Promise<{
 }
 
 // After a successful land, advance the shared canonical checkout's local <base> to
-// origin/<base> so `gw start` and humans browsing it see fresh code. Best-effort:
-// `--ff-only` can never clobber uncommitted work, and the whole thing is swallowed so
-// it can never fail a land.
+// origin/<base> so `gw start` and humans browsing it see fresh code. Best-effort: it
+// can never fail or block a land. But when it CAN'T advance, warn loudly instead of
+// skipping silently — a canonical checkout left behind origin/<base> ships stale code
+// to anything that deploys from it.
 async function fastForwardCanonical(mainDir: string, base: string): Promise<void> {
   try {
-    if (await gitOut(mainDir, ['status', '--porcelain'])) return;
-    if ((await gitOut(mainDir, ['symbolic-ref', '--short', 'HEAD'])) !== base) return;
     await git(mainDir, ['fetch', 'origin', base]);
-    await git(mainDir, ['merge', '--ff-only', `origin/${base}`]);
+    const behind = parseInt(await gitOut(mainDir, ['rev-list', '--count', `${base}..origin/${base}`]) || '0', 10);
+    if (behind === 0) return; // already current — nothing to advance
+
+    // Test CONTENT-level dirtiness, not stat-level. `git status --porcelain` flags a file
+    // as modified when only its mtime changed (e.g. a sync hook rewrites a tracked file
+    // byte-for-byte) — which left a canonical checkout permanently "dirty" and silently
+    // un-advanceable, so a deploy shipped stale code for hours. First refresh the stat
+    // cache, then ask git whether the TREE actually differs from HEAD (diff-index, exit
+    // code) plus whether any untracked files exist (ls-files --others).
+    await git(mainDir, ['update-index', '-q', '--refresh']); // best-effort: drop stale mtime entries
+    const onBase = (await gitOut(mainDir, ['symbolic-ref', '--short', 'HEAD'])) === base;
+    const dirty = (await git(mainDir, ['diff-index', '--quiet', 'HEAD'])).code !== 0
+      || !!(await gitOut(mainDir, ['ls-files', '--others', '--exclude-standard']));
+    if (onBase && !dirty && (await git(mainDir, ['merge', '--ff-only', `origin/${base}`])).code === 0) return;
+
+    const why = !onBase ? `HEAD is on a different branch (not ${base})`
+      : dirty ? `${base} has real uncommitted changes`
+      : `local ${base} has diverged from origin/${base}`;
+    log(`WARNING: canonical checkout ${mainDir} left ${behind} commit(s) behind origin/${base} — ${why}. Deploys from here ship STALE code; reconcile with \`git -C ${mainDir} pull --rebase\`.`);
   } catch { /* best-effort; never block a land */ }
 }
 
@@ -408,7 +476,7 @@ function finishCd(flags: Flags): void {
 
 async function cmdAbort(flags: Flags): Promise<void> {
   const session = resolveSession(flags);
-  if (!session) { log('no gw session here — run from inside a session, or pass the WS id (gw abort WS-NNNNN).'); return finishCd(flags); }
+  if (!session) { log('no gw session here — run from inside a session, or pass the session id (gw abort WT-NNN).'); return finishCd(flags); }
   if (!flags.yes && !flags.inClaude && !(await confirm(`discard session ${session} (all repos)? [y/N] `))) { log('kept.'); return; }
   await removeSession(WORKTREES_DIR, session, REPO_KEYS, `gw/${session}`);
   log(`discarded ${session}`);
@@ -817,15 +885,16 @@ async function cmdInit(flags: Flags): Promise<void> {
 interface Flags {
   dryRun: boolean; noCheck: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
-  noContinue: boolean; new: boolean;
+  noContinue: boolean; new: boolean; show: boolean; help: boolean;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
+  unknown: string[];
 }
 function parseFlags(argv: string[]): Flags {
   const f: Flags = {
     dryRun: false, noCheck: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
-    noContinue: false, new: false,
-    message: '', session: '', olderThan: '', repoFlags: [], rc: '',
+    noContinue: false, new: false, show: false, help: false,
+    message: '', session: '', olderThan: '', repoFlags: [], rc: '', unknown: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -837,6 +906,7 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--force') f.force = true;
     else if (a === '--no-continue') f.noContinue = true;
     else if (a === '--new') f.new = true;
+    else if (a === '--show') f.show = true;
     else if (a === '--echo-prompt') f.echoPrompt = true;
     else if (a === '--simulate-push-reject') f.simulatePushReject = true;
     else if (a === '--print') f.print = true;
@@ -844,7 +914,9 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--older-than') f.olderThan = argv[++i] ?? '';
     else if (a === '--repo') f.repoFlags.push(argv[++i] ?? '');
     else if (a === '-m' || a === '--message') f.message = argv[++i] ?? '';
-    else if (!a.startsWith('-') && !f.session) f.session = a; // positional: WS-id for start(resume)/done/abort
+    else if (a === '-h' || a === '--help') f.help = true;
+    else if (!a.startsWith('-') && !f.session) f.session = a; // positional: session-id for start(resume)/done/abort
+    else if (a.startsWith('-')) f.unknown.push(a); // unrecognized flag — rejected, never silently ignored
   }
   return f;
 }
@@ -854,12 +926,13 @@ const HELP = `gw — Grove Workspace
   gw install [--rc <file>] [--print]          wire the gw command into your shell rc
   gw doctor                                   check tools + shell wiring (run this first)
   gw init [--repo owner/name ...] [--force]   scaffold gw.config.json + slash commands
-  gw start [WS-id] [--no-continue] [--new]    branch every repo, launch the agent
+  gw start [WT-id] [--no-continue] [--new]    branch every repo, launch the agent
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree)
   gw done [--pr] [--no-check] [-m msg]        gate + squash-merge each changed repo
-  gw abort [WS-id]                            discard a session's work
+  gw done --show                              preview per-repo diff to be landed (read-only)
+  gw abort [WT-id]                            discard a session's work
   gw status                                   cross-repo + worktree status
   gw ready                                    done-done check (safe to deploy?)
   gw prune [--older-than 2d] [--dry-run]      remove landed, idle sessions
@@ -871,6 +944,11 @@ const [, , sub, ...rest] = process.argv;
 const flags = parseFlags(rest);
 (async () => {
   if (sub === undefined || sub === '--help' || sub === '-h' || sub === 'help') { console.log(HELP); return; }
+  // `gw <sub> --help` prints usage and does NOTHING ELSE — never falls through to the
+  // command (a stray `gw start --help` used to create a whole session). Unknown flags are
+  // a hard error rather than being silently ignored on a session-mutating command.
+  if (flags.help) { console.log(HELP); return; }
+  if (flags.unknown.length) die(`unknown flag${flags.unknown.length > 1 ? 's' : ''}: ${flags.unknown.join(', ')}\n\n${HELP}`);
   if (sub === 'init') return cmdInit(flags);
   if (sub === 'install') return cmdInstall(flags);   // no workspace needed — wires the shell
   if (sub === 'doctor') return cmdDoctor();           // no workspace needed — checks the env
