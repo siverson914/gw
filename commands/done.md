@@ -32,11 +32,12 @@ The trailing `pwd … || cd …; (exit $rc)` matters: a successful land **delete
 
 `$ARGUMENTS` comes **last on purpose**: a `-m` the user typed in their own `/done` invocation then overrides yours, and other flags (`--pr`, `--no-check`) still pass through.
 
-For **every repo you actually changed**, Step 3 commits pending work, runs that repo's fast pre-merge gate, squash-merges the branch into the base branch (with your message), and pushes. Untouched repos are skipped, and all gates run before any merge — so one red gate lands nothing.
+For **every repo you actually changed**, Step 3 commits pending work, **merges `origin/<base>` into the worktree** (so the gate validates the integrated result, not a stale branch — this is on by default; `--no-sync` skips it), runs that repo's fast pre-merge gate, squash-merges the branch into the base branch (with your message), and pushes. Untouched repos are skipped, and all gates run before any merge — so one red gate lands nothing.
 
 **Run Step 3 directly — do NOT pipe through `grep`/`head`/`tail`.** Those can hide the final `merged + pushed: …` / `did NOT land: …` line, which is the only thing that tells you what happened.
 
 If it stops with a **non-zero exit**, the session is kept ON PURPOSE for recovery — nothing is lost. The command is idempotent: **run the exact same Step 3 command again** (reuse your message). Repos that already landed produce an empty squash (a no-op success); only un-landed repos are retried. A non-zero exit is most often a transient **push race** (origin advanced mid-push — common when other sessions land concurrently), which a re-run clears. Do NOT hand-recover, cherry-pick, or go spelunking local refs — re-running is the fix. The error names the repo (e.g. `[cli] …`):
+- **Pre-gate merge conflict** (`origin/<base>` advanced and conflicts with the branch) — gw stops before gating. `cd` into the named worktree, run `git merge origin/<base>`, resolve the conflicts, commit, then run Step 3 again. This is the staleness that used to slip through as a green gate on un-integrated code.
 - **Gate failed** — read the failing output, fix the code in that repo's worktree, then run Step 3 again.
 - **Squash conflict** (base advanced) — run the rebase commands it prints (`git fetch` + `git rebase origin/<base>`) in the named worktree, resolve the conflicts, then run Step 3 again.
 - **Session gate failed** (a configured cross-repo `--check`) — run the regenerate step it names, commit the regenerated files, then run Step 3 again.

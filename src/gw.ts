@@ -22,13 +22,14 @@
  *                       a bare `gw start` from inside a session worktree) re-enters that
  *                       session and CONTINUES the prior agent conversation by default
  *                       (--no-continue for a clean one; --new forces a brand-new session).
- *   gw done   [--pr]    for EVERY repo you actually changed: gate -> squash-merge to
- *                       <base> + push (default), or push a branch + open a PR (--pr).
- *                       Untouched repos are skipped. All gates run before any merge,
- *                       so one red gate lands nothing. Only one gate runs at a time
- *                       per workspace (a lock serializes concurrent `gw done`s so
- *                       their suites don't starve shared test resources); --no-lock
- *                       opts out.
+ *   gw done   [--pr]    for EVERY repo you actually changed: merge origin/<base> in
+ *                       (so the gate sees the integrated result, not the stale branch;
+ *                       --no-sync opts out) -> gate -> squash-merge to <base> + push
+ *                       (default), or push a branch + open a PR (--pr). Untouched repos
+ *                       are skipped. All gates run before any merge, so one red gate
+ *                       lands nothing. Only one gate runs at a time per workspace (a
+ *                       lock serializes concurrent `gw done`s so their suites don't
+ *                       starve shared test resources); --no-lock opts out.
  *   gw abort            discard every repo's branch work; <base> is never touched.
  *   gw status           one-glance check of EVERY repo + worktree: branch,
  *                       uncommitted/untracked, ahead/behind upstream.
@@ -276,7 +277,13 @@ async function cmdDone(flags: Flags): Promise<void> {
   if (!pending.length) { log(`nothing to merge in ${session}.`); await removeSession(WORKTREES_DIR, session, REPO_KEYS, branch); return finishCd(flags); }
   log(`${session} changed: ${pending.map((p) => p.repo).join(', ')}`);
 
-  // 2. Gate ALL changed repos first — one red gate stops everything, nothing merged.
+  // 2. Bring origin/<base> INTO each changed worktree before gating, so the gate (and
+  // the land) act on the integrated result, not the stale branch in isolation. This is
+  // the guardrail that makes staleness deterministic instead of something an agent has
+  // to happen to notice. Default on; --no-sync opts out.
+  if (!flags.noSync) await syncPending(pending);
+
+  // 3. Gate ALL changed repos first — one red gate stops everything, nothing merged.
   // The whole gate phase runs under a workspace-wide lock (unless --no-lock) so only
   // one `gw done` exercises the shared test resources (DB/Redis/sandbox) at a time;
   // concurrent suites used to starve each other into OOM-kills ("gate failed (exit
@@ -318,7 +325,7 @@ async function cmdDone(flags: Flags): Promise<void> {
     return finishCd(flags);
   }
 
-  // 3. Land each changed repo independently (separate git repos can't be atomic);
+  // 4. Land each changed repo independently (separate git repos can't be atomic);
   // report per repo. Only tear the session down if EVERY repo landed.
   const landed: string[] = [], failed: string[] = [];
   for (const p of pending) {
@@ -375,6 +382,30 @@ async function fallbackMessage(wt: string, base: string, name: string): Promise<
   const subject = `update ${files.length} file${files.length === 1 ? '' : 's'} in ${where} (${name})`;
   const shown = files.slice(0, 20).map((f) => `- ${f}`).join('\n');
   return `${subject}\n\n${shown}${files.length > 20 ? `\n- …and ${files.length - 20} more` : ''}`;
+}
+
+// Merge origin/<base> into each changed worktree BEFORE the gate runs, so the gate
+// validates the code exactly as it will land — not the stale branch on its own. gw
+// squash-merges at land time, so the merge commit created here is harmless (it's
+// squashed away); its whole value is that staleness is resolved every time, on every
+// land, rather than depending on someone noticing the branch is behind. The worktree is
+// already clean at this point (pending edits were committed above), so the merge has a
+// clean tree to work from. A conflict stops the land early — pointing at the exact
+// worktree to fix — which is strictly better than a green gate on code that no longer
+// integrates cleanly with <base>.
+async function syncPending(pending: Pending[]): Promise<void> {
+  for (const p of pending) {
+    const base = REPOS[p.repo].base;
+    await git(p.wt, ['fetch', 'origin', base]);
+    const behind = parseInt(await gitOut(p.wt, ['rev-list', '--count', `HEAD..origin/${base}`]) || '0', 10);
+    if (behind === 0) continue;
+    log(`[${p.repo}] ${behind} commit(s) behind origin/${base} — merging it in before the gate ...`);
+    const m = await git(p.wt, ['merge', '--no-edit', `origin/${base}`]);
+    if (m.code !== 0) {
+      await git(p.wt, ['merge', '--abort']);
+      die(`[${p.repo}] origin/${base} advanced and conflicts with this branch. Resolve it, then re-run gw done:\n  cd ${p.wt}\n  git merge origin/${base}   # fix the conflicts, then commit\nNothing was gated or merged. (Skip this integration with --no-sync — the land still three-way merges, but the gate then runs against the un-integrated branch.)`);
+    }
+  }
 }
 
 // Land ONE repo: build a squash commit in a disposable worktree off origin/<base> and
@@ -900,7 +931,7 @@ async function cmdInit(flags: Flags): Promise<void> {
 // ── flags + dispatch ─────────────────────────────────────────────────────────
 
 interface Flags {
-  dryRun: boolean; noCheck: boolean; noLock: boolean; pr: boolean; inClaude: boolean; yes: boolean;
+  dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
@@ -908,7 +939,7 @@ interface Flags {
 }
 function parseFlags(argv: string[]): Flags {
   const f: Flags = {
-    dryRun: false, noCheck: false, noLock: false, pr: false, inClaude: false, yes: false,
+    dryRun: false, noCheck: false, noLock: false, noSync: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false,
     message: '', session: '', olderThan: '', repoFlags: [], rc: '', unknown: [],
@@ -918,6 +949,7 @@ function parseFlags(argv: string[]): Flags {
     if (a === '--dry-run') f.dryRun = true;
     else if (a === '--no-check') f.noCheck = true;
     else if (a === '--no-lock') f.noLock = true;
+    else if (a === '--no-sync') f.noSync = true;
     else if (a === '--pr') f.pr = true;
     else if (a === '--in-claude') f.inClaude = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
@@ -948,9 +980,11 @@ const HELP = `gw — Grove Workspace
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree)
-  gw done [--pr] [--no-check] [--no-lock]     gate + squash-merge each changed repo
-          [-m msg]                            (one gate at a time per workspace;
-                                              --no-lock runs concurrently anyway)
+  gw done [--pr] [--no-check] [--no-lock]     merge origin/<base> in, gate, then
+          [--no-sync] [-m msg]                squash-merge each changed repo
+                                              (one gate at a time per workspace;
+                                              --no-lock runs concurrently anyway;
+                                              --no-sync skips the pre-gate merge)
   gw done --show                              preview per-repo diff to be landed (read-only)
   gw abort [WT-id]                            discard a session's work
   gw status                                   cross-repo + worktree status
