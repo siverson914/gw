@@ -97,15 +97,22 @@ export function lastActiveLabel(tsSec: number | null, nowSec: number): string {
 // instead of a title — falls back to slugify(prompt), so naming can never block or
 // break a session start. Only the first 1000 chars are sent, in case the prompt is a
 // giant pasted log.
-export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec?: typeof run; namer?: string[] } = {}): Promise<string> {
+// Models the namer is allowed to infer from the prompt. Kept to `claude --model`
+// aliases so an inferred value is always a safe, complete argv token — never
+// arbitrary flags. Anything the namer emits outside this set is ignored.
+const NAMER_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable']);
+
+export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec?: typeof run; namer?: string[] } = {}): Promise<{ slug: string; model?: string }> {
   const { timeoutMs = 20_000, exec = run, namer = DEFAULT_NAMER.split(/\s+/) } = opts;
   const text = prompt.trim().slice(0, 1000);
-  if (!text || !namer.length) return slugify(prompt);
+  if (!text || !namer.length) return { slug: slugify(prompt) };
   const ask = [
     'Below is the starting prompt of a dev session (possibly truncated). Its git worktree needs a name',
     'that identifies the work at a glance among many other sessions.',
     'Reply with ONLY a 2-5 word descriptive title — name the specific feature/bug/area, not generic',
     'words like "fix", "update", "task". No quotes, no punctuation, no explanation.',
+    'If — AND ONLY IF — the prompt explicitly asks to run on a specific Claude model, add one final',
+    'token after the title: @opus, @sonnet, or @haiku. If no model is named, add no @ token at all.',
     '',
     '---',
     text,
@@ -113,17 +120,27 @@ export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec
   try {
     const r = await exec(namer[0], [...namer.slice(1), '-p', ask], { timeoutMs });
     const out = r.stdout.trim();
-    const wordCount = out.split(/\s+/).filter(Boolean).length;
-    // Accept only what looks like an actual title: one line, 1-6 words. Anything
-    // else (multi-line prose, an apology) is junk — use the fallback. A clean
-    // single-word title (e.g. "authentication") is fine; don't reject it just for
-    // lacking a dash, which used to force the uglier full-prompt fallback.
-    if (r.code === 0 && out && !out.includes('\n') && wordCount >= 1 && wordCount <= 6) {
-      const s = slugify(out);
-      if (s) return s;
+    if (r.code === 0 && out && !out.includes('\n')) {
+      // Split off an optional trailing @model token, then validate what's left as a
+      // title. Only an allowlisted alias is accepted; a bare `@word` (e.g. `@fix`) or
+      // anything else stays in the title and slugify() drops the `@`.
+      const words = out.split(/\s+/).filter(Boolean);
+      let model: string | undefined;
+      const last = words[words.length - 1];
+      if (last?.startsWith('@') && NAMER_MODELS.has(last.slice(1).toLowerCase())) {
+        model = last.slice(1).toLowerCase();
+        words.pop();
+      }
+      // Accept only what looks like an actual title: one line, 1-6 words (after the
+      // @model token is stripped). Anything else (multi-line prose, an apology) is
+      // junk — use the fallback. A clean single-word title is fine.
+      if (words.length >= 1 && words.length <= 6) {
+        const s = slugify(words.join(' '));
+        if (s) return { slug: s, model };
+      }
     }
   } catch { /* fall through to the plain slug */ }
-  return slugify(prompt);
+  return { slug: slugify(prompt) };
 }
 
 const ID_PREFIX = 'WT';   // current prefix for NEW ids ("work tree")

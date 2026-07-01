@@ -198,12 +198,17 @@ async function cmdStart(flags: Flags): Promise<void> {
   const prompt = await readPrompt();
   if (prompt === null) { log('cancelled — no session started.'); emit('NONE'); return; }
   if (prompt) log('naming session ...');
-  const id = await allocateId(await smartSlug(prompt, { namer: WS.namer }));
+  // The namer's one Haiku call also infers a model when the prompt explicitly names
+  // one (opus/sonnet/haiku/fable) — thread it into the launcher as `--model <x>`.
+  // Absent → launch on the default model.
+  const { slug, model } = await smartSlug(prompt, { namer: WS.namer });
+  const id = await allocateId(slug);
   await ensureSession(WORKTREES_DIR, id, `gw/${id}`, REPO_KEYS);
   await assertIsolatedSession(WORKTREES_DIR, id, REPO_KEYS);
-  log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')}`);
+  log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')}${model ? ` on ${model}` : ''}`);
   seedMcpApproval(sessionDir(WORKTREES_DIR, id));
-  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(prompt) : '', b64(WS.launcher.join(' ')));
+  const launcher = model ? [...WS.launcher, '--model', model] : WS.launcher;
+  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(prompt) : '', b64(launcher.join(' ')));
 }
 
 // Resolve which session a `done`/`abort` acts on: an explicit positional session-id wins,
