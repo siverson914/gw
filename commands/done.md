@@ -25,10 +25,10 @@ GW_ROOT="__GW_ROOT__" __GW_TSX__ "__GW_TS__" done --in-claude -m "$(cat <<'EOF'
 - <body bullet>
 - <body bullet>
 EOF
-)" $ARGUMENTS; rc=$?; pwd >/dev/null 2>&1 || cd "__GW_ROOT__"; (exit $rc)
+)" $ARGUMENTS; rc=$?; pwd -P >/dev/null 2>&1 || cd "__GW_ROOT__"; (exit $rc)
 ```
 
-The trailing `pwd … || cd …; (exit $rc)` matters: a successful land **deletes this worktree**, which is your shell's current directory. Without it your next command fails with `getcwd: cannot access parent directories` — which reads like the land failed even though it succeeded. This lands you back at the workspace root while preserving gw's real exit code. Judge success by the printed `merged + pushed: …` line, not just the exit code.
+The trailing `pwd -P … || cd …; (exit $rc)` matters: a successful land **deletes this worktree**, which is your shell's current directory. Without it your next command fails with `getcwd: cannot access parent directories` — which reads like the land failed even though it succeeded. It **must** be `pwd -P` (a real `getcwd` syscall), not plain `pwd`: the `pwd` builtin just echoes the stale `$PWD` and returns 0 even after the directory is gone, so `|| cd` would never fire and the shell would stay stranded (that stray non-zero exit is exactly this bug). `pwd -P` lands you back at the workspace root while preserving gw's real exit code. Judge success by the printed `merged + pushed: …` line, not just the exit code.
 
 `$ARGUMENTS` comes **last on purpose**: a `-m` the user typed in their own `/done` invocation then overrides yours, and other flags (`--pr`, `--no-check`) still pass through.
 

@@ -640,7 +640,7 @@ async function cmdSetup(): Promise<void> {
   // Bake absolute paths into the installed slash commands so /done works from ANY
   // repo's worktree (which has no gw checkout of its own — it must call gw by path).
   const gwTs = fileURLToPath(import.meta.url);
-  for (const f of ['done.md', 'abort.md', 'donedone.md']) {
+  for (const f of ['done.md', 'df.md', 'abort.md', 'donedone.md']) {
     const src = path.join(srcDir, f);
     if (!fs.existsSync(src)) { log(`MISSING command source ${src}`); continue; }
     const body = fs.readFileSync(src, 'utf-8').replaceAll('__GW_ROOT__', REPO_ROOT).replaceAll('__GW_TS__', gwTs).replaceAll('__GW_TSX__', tsxCmd());
