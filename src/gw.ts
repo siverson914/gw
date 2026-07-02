@@ -55,7 +55,7 @@ import {
   setWorkspace,
   run, git, gitOut, slugify, smartSlug, allocateId, parseId,
   ensureSession, removeSession, listSessions, resolveSessionFromCwd,
-  assertIsolatedSession, isSessionWorktree, type RepoKey,
+  assertIsolatedSession, isSessionWorktree, type RepoKey, type RunResult,
   sessionDir, sessionRepoDir, withRepoLandLock, withGateLock, stagedLinkPaths,
   landTmpRoot, landTmpDir, sweepLandTmp, lastActiveLabel,
 } from './lib/worktrees.js';
@@ -404,7 +404,13 @@ async function showSessionDiff(session: string, branch: string): Promise<void> {
 async function fallbackMessage(wt: string, base: string, name: string): Promise<string> {
   const subjects = (await gitOut(wt, ['log', `origin/${base}..HEAD`, '--format=%s', '--reverse']))
     .split('\n').map((s) => s.trim()).filter(Boolean);
-  const meaningful = [...new Set(subjects.filter((s) => !s.startsWith('wip:')))];
+  // Drop gw's own noise: `wip:` auto-commits AND the sync-merge commit gw creates
+  // when it pulls origin/<base> into the worktree before gating (`Merge
+  // remote-tracking branch 'origin/main' into gw/…`). Without the merge filter, a
+  // branch whose only real commit is a wip auto-commit would land under the
+  // meaningless merge subject instead of falling through to the file-list summary.
+  const NOISE = /^(wip:|Merge (remote-tracking )?branch )/;
+  const meaningful = [...new Set(subjects.filter((s) => !NOISE.test(s)))];
   if (meaningful.length === 1) return meaningful[0];
   if (meaningful.length > 1) return `${meaningful[0]}\n\n${meaningful.slice(1).map((s) => `- ${s}`).join('\n')}`;
 
@@ -498,16 +504,40 @@ async function landRepo(p: Pending, flags: Flags): Promise<{ ok: boolean; reason
 // Push the temp tree's squash commit to origin/<base>. On reject (origin advanced
 // between fetch and push) fetch + rebase once + retry. Never loop.
 // --simulate-push-reject forces the first attempt to fail.
+// A fetch+rebase+retry only helps a NON-FAST-FORWARD (origin/<base> advanced under
+// us). Every other push rejection — secret-scanning push protection (GH013), a
+// pre-receive hook, permission/SSO denial — fails identically on a rerun, so telling
+// the user to "rerun gw done" is actively misleading. Detect the fast-forward case
+// narrowly; for anything else, surface git's real stderr so the cause is visible.
+function isNonFastForward(out: string): boolean {
+  return /fetch first|non-fast-forward|\(fetch first\)|tip of your current branch is behind|Updates were rejected because/i.test(out);
+}
+function pushErrTail(r: { stdout: string; stderr: string }): string {
+  const msg = (r.stderr || r.stdout || '').trim();
+  if (!msg) return '';
+  // Keep it readable but complete enough to show a GH013 secret-scanning block
+  // (which spans many `remote:` lines including the unblock URL).
+  return '\n' + msg.split('\n').map((l) => `    ${l}`).join('\n');
+}
+
 async function pushWithRetry(tmp: string, flags: Flags, base: string): Promise<{ ok: boolean; reason?: string }> {
+  let last: RunResult | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (!(attempt === 0 && flags.simulatePushReject)) {
-      if ((await git(tmp, ['push', 'origin', `HEAD:${base}`])).code === 0) return { ok: true };
+      const r = await git(tmp, ['push', 'origin', `HEAD:${base}`]);
+      if (r.code === 0) return { ok: true };
+      last = r;
+      // Only a non-fast-forward is worth a fetch+rebase+retry. Bail immediately on
+      // anything else with the real remote message — a rerun cannot fix it.
+      if (!isNonFastForward(`${r.stderr}\n${r.stdout}`)) {
+        return { ok: false, reason: `push to origin/${base} was REJECTED (a rerun will NOT fix this — resolve the cause below):${pushErrTail(r)}` };
+      }
     }
-    if (attempt === 1) return { ok: false, reason: `push to origin/${base} rejected twice — rerun gw done.` };
+    if (attempt === 1) return { ok: false, reason: `push to origin/${base} rejected twice — origin/${base} kept advancing under us. Rerun gw done.${last ? pushErrTail(last) : ''}` };
     await git(tmp, ['fetch', 'origin', base]);
     if ((await git(tmp, ['rebase', `origin/${base}`])).code !== 0) { await git(tmp, ['rebase', '--abort']); return { ok: false, reason: `${base} moved under us and the rebase conflicted — rerun gw done.` }; }
   }
-  return { ok: false, reason: 'push failed.' };
+  return { ok: false, reason: `push failed.${last ? pushErrTail(last) : ''}` };
 }
 
 // After a successful land, advance the shared canonical checkout's local <base> to
