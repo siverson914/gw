@@ -9,7 +9,7 @@
   "scripts": {
     "gw": "tsx src/gw.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/gw.ts --help"
+    "test": "node --import tsx --test test/gw.test.ts"
   },
   "engines": {
     "node": ">=18"

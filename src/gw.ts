@@ -223,6 +223,17 @@ function resolveSession(flags: Flags): string | null {
 
 interface Pending { repo: RepoKey; wt: string; branch: string; name: string; }
 
+// Gate timeout: 12 min default. GW_GATE_TIMEOUT_MS overrides — primarily so the test
+// harness can exercise the timeout path in milliseconds instead of minutes.
+function gateTimeoutMs(): number {
+  const v = parseInt(process.env.GW_GATE_TIMEOUT_MS ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : 12 * 60_000;
+}
+/** "90000" → "1.5m", "2000" → "2s" — for timeout messages. */
+function fmtMs(ms: number): string {
+  return ms >= 60_000 ? `${+(ms / 60_000).toFixed(1)}m` : `${+(ms / 1000).toFixed(1)}s`;
+}
+
 async function cmdDone(flags: Flags): Promise<void> {
   const session = resolveSession(flags);
   if (!session) die('no gw session: run /done from inside a session worktree, or pass the session id (gw done WT-NNN).');
@@ -248,14 +259,15 @@ async function cmdDone(flags: Flags): Promise<void> {
     await git(wt, ['add', '-A']);
     // A worktree-linked dep/env path must NEVER appear in a commit — neither added
     // NOR deleted. Reset the index entry back to HEAD: for a path that is tracked in
-    // the base this restores it (commit records no change); for an untracked path it
-    // simply unstages. NEVER `git rm --cached` here — for a TRACKED linkPath that
-    // stages a DELETION that then lands on the base branch (this is how a tracked
-    // `.env` got wiped from origin/main). Self-healing + loud, since a tracked
-    // linkPath is a repo-hygiene bug the user should fix.
-    for (const rel of await stagedLinkPaths(wt, repo)) {
+    // the base this restores it (commit records no change — this covers the staged
+    // DELETION that once wiped a tracked `.env` from origin/main); for an untracked
+    // path it simply unstages. NEVER `git rm --cached` here — that STAGES the very
+    // deletion we're guarding against. Self-healing + loud, since a tracked linkPath
+    // is a repo-hygiene bug the user should fix.
+    for (const { rel, trackedInHead } of await stagedLinkPaths(wt, repo)) {
       await git(wt, ['reset', '-q', 'HEAD', '--', rel]);
-      log(`[${repo}] linked path '${rel}' is TRACKED in ${repo} — left untouched (NOT committed/deleted). Fix: add it to ${repo}/.gitignore and \`git rm --cached ${rel}\` in a deliberate commit so gw can symlink it cleanly.`);
+      if (trackedInHead) log(`[${repo}] linked path '${rel}' is TRACKED in ${repo} — staged change dropped (NOT committed or deleted). Fix: add it to ${repo}/.gitignore and \`git rm --cached ${rel}\` in a deliberate commit so gw can symlink it cleanly.`);
+      else log(`[${repo}] linked path '${rel}' was staged — unstaged (linked deps/env never land).`);
     }
     if ((await git(wt, ['diff', '--cached', '--quiet'])).code !== 0) await git(wt, ['commit', '-m', `wip: ${session}`]);
     if (parseInt(await gitOut(wt, ['rev-list', '--count', `origin/${REPOS[repo].base}..HEAD`]) || '0', 10) > 0) {
@@ -310,7 +322,11 @@ async function cmdDone(flags: Flags): Promise<void> {
         const gateEnv = { GW_BASE: `origin/${base}`, GW_CHANGED_FILES: changed.split('\n').filter(Boolean).join('\n') };
         const label = scoped ? 'quick gate' : 'gate';
         log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
-        const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: 12 * 60_000, env: gateEnv, onStdout: (s) => process.stderr.write(s) });
+        const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) });
+        // A timeout SIGKILLs the process tree and surfaces as `code: null` — say so
+        // explicitly instead of the cryptic "gate failed (exit null)" (which historically
+        // meant an OOM-killed or hung suite and sent people down the wrong path).
+        if (g.timedOut) die(`[${p.repo}] ${label} TIMED OUT after ${fmtMs(gateTimeoutMs())} and was killed. A hung suite or starved test resource, not a test failure. Re-run, or skip with --no-check. Nothing was merged.`);
         if (g.code !== 0) die(`[${p.repo}] ${label} failed (exit ${g.code}). Fix and re-run, or skip with --no-check. Nothing was merged.`);
         log(`[${p.repo}] ${label} passed.`);
       }
@@ -324,7 +340,8 @@ async function cmdDone(flags: Flags): Promise<void> {
         if (fs.existsSync(wt)) {
           for (const cmd of sg.commands) {
             log(`[${sg.repo}] session gate: ${cmd.join(' ')} ...`);
-            const d = await run(cmd[0], cmd.slice(1), { cwd: wt, timeoutMs: 5 * 60_000, onStdout: (s) => process.stderr.write(s) });
+            const d = await run(cmd[0], cmd.slice(1), { cwd: wt, timeoutMs: Math.min(gateTimeoutMs(), 5 * 60_000), onStdout: (s) => process.stderr.write(s) });
+            if (d.timedOut) die(`session gate TIMED OUT after ${fmtMs(Math.min(gateTimeoutMs(), 5 * 60_000))} and was killed (${cmd.join(' ')}). Re-run gw done. Nothing was merged.`);
             if (d.code !== 0) die(`session gate failed (${cmd.join(' ')}). Fix, commit any regenerated files, then re-run gw done. Nothing was merged.`);
           }
           log(`[${sg.repo}] session gate passed.`);
@@ -541,7 +558,21 @@ function finishCd(flags: Flags): void {
 async function cmdAbort(flags: Flags): Promise<void> {
   const session = resolveSession(flags);
   if (!session) { log('no gw session here — run from inside a session, or pass the session id (gw abort WT-NNN).'); return finishCd(flags); }
-  if (!flags.yes && !flags.inClaude && !(await confirm(`discard session ${session} (all repos)? [y/N] `))) { log('kept.'); return; }
+  // Show exactly what would be discarded BEFORE any decision, so neither a human nor
+  // an agent throws away work sight-unseen.
+  const unlanded = await sessionUnlanded(session);
+  if (unlanded.length) log(`${session} has UNLANDED work:\n  ${unlanded.join('\n  ')}`);
+  if (!flags.yes) {
+    if (flags.inClaude) {
+      // An agent can't answer an interactive prompt — historically we just proceeded,
+      // which let /abort silently destroy real work. Now: discarding NOTHING is safe to
+      // do unprompted; discarding unlanded work requires an explicit --yes (the /abort
+      // skill confirms with the user, then re-runs with --yes).
+      if (unlanded.length) {
+        die(`refusing to discard ${session}: it has unlanded work (above) and no --yes was given.\nIf the user really wants it gone, re-run: gw abort ${session} --yes\nTo keep the work instead, land it with /done.`);
+      }
+    } else if (!(await confirm(`discard session ${session} (all repos${unlanded.length ? ', INCLUDING the unlanded work above' : ''})? [y/N] `))) { log('kept.'); return; }
+  }
   await removeSession(WORKTREES_DIR, session, REPO_KEYS, `gw/${session}`);
   log(`discarded ${session}`);
   return finishCd(flags);
@@ -1008,7 +1039,9 @@ const HELP = `gw — Grove Workspace
                                               the full gate even where a repo
                                               defaults to quick via gateQuickDefault)
   gw done --show                              preview per-repo diff to be landed (read-only)
-  gw abort [WT-id]                            discard a session's work
+  gw abort [WT-id] [--yes]                    discard a session's work (shows what's
+                                              unlanded first; refuses unlanded work
+                                              in --in-claude mode without --yes)
   gw status                                   cross-repo + worktree status
   gw ready                                    done-done check (safe to deploy?)
   gw prune [--older-than 2d] [--dry-run]      remove landed, idle sessions

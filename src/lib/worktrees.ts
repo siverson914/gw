@@ -492,14 +492,21 @@ export function resolveSessionFromCwd(worktreesRoot: string, cwd: string): strin
   return seg && parseId(seg) ? seg : null;
 }
 
-/** Guard against the node_modules-symlink disaster: refuse to proceed if any of a
- *  repo's linked paths is tracked/staged (a worktree-linked symlink must never be
- *  committed). Returns the offending paths, or [] when clean. */
-export async function stagedLinkPaths(repoWt: string, repo: RepoKey): Promise<string[]> {
-  const bad: string[] = [];
+/** Guard against the linkPath disaster: a worktree-linked dep/env path must never
+ *  appear in a commit — neither ADDED (a symlink landing in git) nor DELETED (this is
+ *  how a tracked `.env` got wiped from origin/main). Returns every linkPath with a
+ *  STAGED change vs HEAD (add, modify, or delete — `diff --cached` sees all three;
+ *  the old `ls-files --error-unmatch` probe missed staged DELETIONS, because a staged
+ *  deletion removes the path from the index and the probe answered "not tracked").
+ *  `trackedInHead` distinguishes the repo-hygiene bug (a linkPath committed to the
+ *  repo) from a mere staged symlink, so the caller can warn appropriately. */
+export async function stagedLinkPaths(repoWt: string, repo: RepoKey): Promise<Array<{ rel: string; trackedInHead: boolean }>> {
+  const bad: Array<{ rel: string; trackedInHead: boolean }> = [];
   for (const rel of ws.repos[repo].linkPaths) {
-    const r = await git(repoWt, ['ls-files', '--error-unmatch', rel]);
-    if (r.code === 0) bad.push(rel); // tracked → would be committed
+    const staged = (await git(repoWt, ['diff', '--cached', '--quiet', '--', rel])).code !== 0;
+    if (!staged) continue;
+    const trackedInHead = !!(await gitOut(repoWt, ['ls-tree', '--name-only', 'HEAD', '--', rel]));
+    bad.push({ rel, trackedInHead });
   }
   return bad;
 }
