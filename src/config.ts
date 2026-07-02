@@ -25,6 +25,8 @@ export interface RepoCfg {
   linkPaths: string[];         // gitignored deps/env to symlink into each worktree (node_modules, .env)
   copyPaths: string[];         // gitignored files a docker build needs as REAL files (not symlinks)
   gate: string[] | null;       // fast pre-merge check, run in the worktree; null = none
+  gateQuick: string[] | null;  // optional lighter, diff-scoped gate for `gw done --quick`; null = fall back to gate
+  gateQuickDefault: boolean;   // run gateQuick by default (no --quick needed); --full forces the full gate anyway
   nmScope?: string;            // npm workspace scope (e.g. "@acme") needing a per-worktree node_modules farm
 }
 
@@ -132,6 +134,8 @@ export function loadWorkspace(start = process.cwd()): Workspace {
       linkPaths: r.linkPaths ?? [],
       copyPaths: r.copyPaths ?? [],
       gate: r.gate ?? null,
+      gateQuick: r.gateQuick ?? null,
+      gateQuickDefault: r.gateQuickDefault ?? false,
       nmScope: r.nmScope,
     };
   }

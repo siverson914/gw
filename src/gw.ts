@@ -291,12 +291,28 @@ async function cmdDone(flags: Flags): Promise<void> {
   if (!flags.noCheck) {
     const runGates = async () => {
       for (const p of pending) {
-        const gate = REPOS[p.repo].gate;
+        const base = REPOS[p.repo].base;
+        // Run the repo's lighter, diff-scoped gate when --quick is passed OR the repo
+        // opts in via gateQuickDefault (safe only where something downstream re-runs the
+        // full suite — e.g. a deploy gate). --full forces the complete gate regardless.
+        // Missing gateQuick safely falls back to the full gate, so quick is never LESS
+        // safe than a plain done — at worst it's identical.
+        const useQuick = (flags.quick || REPOS[p.repo].gateQuickDefault) && !flags.full;
+        const scoped = useQuick ? REPOS[p.repo].gateQuick : null;
+        const gate = scoped ?? REPOS[p.repo].gate;
         if (!gate) continue;
-        log(`[${p.repo}] gate: ${gate.join(' ')} ...`);
-        const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: 12 * 60_000, onStdout: (s) => process.stderr.write(s) });
-        if (g.code !== 0) die(`[${p.repo}] gate failed (exit ${g.code}). Fix and re-run, or skip with --no-check. Nothing was merged.`);
-        log(`[${p.repo}] gate passed.`);
+        if (useQuick && !scoped) log(`[${p.repo}] no gateQuick configured — running the full gate.`);
+        // Hand every gate the base ref and the files this branch changed vs it (via env),
+        // so a diff-scoped gate can run only the affected tests. Harmless to a gate that
+        // ignores them. `origin/<base>...HEAD` is the branch's own changes (origin/<base>
+        // was already merged into the worktree above, so this is the net diff to land).
+        const changed = await gitOut(p.wt, ['diff', '--name-only', `origin/${base}...HEAD`]);
+        const gateEnv = { GW_BASE: `origin/${base}`, GW_CHANGED_FILES: changed.split('\n').filter(Boolean).join('\n') };
+        const label = scoped ? 'quick gate' : 'gate';
+        log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
+        const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: 12 * 60_000, env: gateEnv, onStdout: (s) => process.stderr.write(s) });
+        if (g.code !== 0) die(`[${p.repo}] ${label} failed (exit ${g.code}). Fix and re-run, or skip with --no-check. Nothing was merged.`);
+        log(`[${p.repo}] ${label} passed.`);
       }
 
       // Optional session-level gate: catches cross-repo drift a per-repo gate misses
@@ -931,7 +947,7 @@ async function cmdInit(flags: Flags): Promise<void> {
 // ── flags + dispatch ─────────────────────────────────────────────────────────
 
 interface Flags {
-  dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; pr: boolean; inClaude: boolean; yes: boolean;
+  dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; quick: boolean; full: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
@@ -939,7 +955,7 @@ interface Flags {
 }
 function parseFlags(argv: string[]): Flags {
   const f: Flags = {
-    dryRun: false, noCheck: false, noLock: false, noSync: false, pr: false, inClaude: false, yes: false,
+    dryRun: false, noCheck: false, noLock: false, noSync: false, quick: false, full: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false,
     message: '', session: '', olderThan: '', repoFlags: [], rc: '', unknown: [],
@@ -950,6 +966,8 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--no-check') f.noCheck = true;
     else if (a === '--no-lock') f.noLock = true;
     else if (a === '--no-sync') f.noSync = true;
+    else if (a === '--quick') f.quick = true;
+    else if (a === '--full') f.full = true;
     else if (a === '--pr') f.pr = true;
     else if (a === '--in-claude') f.inClaude = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
@@ -981,10 +999,14 @@ const HELP = `gw — Grove Workspace
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree)
   gw done [--pr] [--no-check] [--no-lock]     merge origin/<base> in, gate, then
-          [--no-sync] [-m msg]                squash-merge each changed repo
-                                              (one gate at a time per workspace;
+          [--no-sync] [--quick|--full]        squash-merge each changed repo
+          [-m msg]                            (one gate at a time per workspace;
                                               --no-lock runs concurrently anyway;
-                                              --no-sync skips the pre-gate merge)
+                                              --no-sync skips the pre-gate merge;
+                                              --quick runs each repo's lighter,
+                                              diff-scoped gateQuick; --full forces
+                                              the full gate even where a repo
+                                              defaults to quick via gateQuickDefault)
   gw done --show                              preview per-repo diff to be landed (read-only)
   gw abort [WT-id]                            discard a session's work
   gw status                                   cross-repo + worktree status

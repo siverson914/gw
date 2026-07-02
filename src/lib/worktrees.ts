@@ -30,9 +30,9 @@ export interface RunResult { code: number | null; stdout: string; stderr: string
 
 // Own process group so a timeout kills the whole tree (gate commands spawn
 // grandchildren). Default cwd = process.cwd() (callers pass cwd explicitly).
-export function run(cmd: string, args: string[], o: { cwd?: string; timeoutMs?: number; onStdout?: (s: string) => void } = {}): Promise<RunResult> {
+export function run(cmd: string, args: string[], o: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; onStdout?: (s: string) => void } = {}): Promise<RunResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: o.cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const child = spawn(cmd, args, { cwd: o.cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: o.env ? { ...process.env, ...o.env } : undefined });
     let stdout = '', stderr = '', timedOut = false, settled = false;
     let timer: NodeJS.Timeout | null = null;
     const finish = (r: RunResult) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(r); };
