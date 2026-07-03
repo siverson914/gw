@@ -92,7 +92,8 @@ export function lastActiveLabel(tsSec: number | null, nowSec: number): string {
 
 // LLM-assisted session title: ask the configured `namer` command (default
 // `claude --model haiku` — already a hard gw dependency since gw launches the agent
-// in every session) for a 2-5 word title of the prompt, then slugify it. One-shot,
+// in every session) for a 2-4 word area-first label of the prompt, then slugify it
+// (slugify dashes any spaces/slashes, so the label stays a safe dir/tab basename). One-shot,
 // a few seconds. Any failure — binary missing, timeout, non-zero exit, prose/refusal
 // instead of a title — falls back to slugify(prompt), so naming can never block or
 // break a session start. Only the first 1000 chars are sent, in case the prompt is a
@@ -107,12 +108,15 @@ export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec
   const text = prompt.trim().slice(0, 1000);
   if (!text || !namer.length) return { slug: slugify(prompt) };
   const ask = [
-    'Below is the starting prompt of a dev session (possibly truncated). Its git worktree needs a name',
-    'that identifies the work at a glance among many other sessions.',
-    'Reply with ONLY a 2-5 word descriptive title — name the specific feature/bug/area, not generic',
-    'words like "fix", "update", "task". No quotes, no punctuation, no explanation.',
+    'Below is the starting prompt of a dev session (possibly truncated). It needs a short label',
+    'so its git worktree can be told apart from many parallel sessions at a glance.',
+    'Reply with ONLY a 2-4 word lowercase label. Lead with the area or component being worked on',
+    '(e.g. cli, ui, auth, gw, docs, db, api), then 1-3 words naming the specific task within it.',
+    'Name the real feature/bug/area — never generic filler like "fix", "update", "task", "change".',
+    'No quotes, no punctuation, no slashes, no explanation.',
+    'Examples: "cli parser flags", "auth login redirect", "docs worktree naming".',
     'If — AND ONLY IF — the prompt explicitly asks to run on a specific Claude model, add one final',
-    'token after the title: @opus, @sonnet, or @haiku. If no model is named, add no @ token at all.',
+    'token after the label: @opus, @sonnet, or @haiku. If no model is named, add no @ token at all.',
     '',
     '---',
     text,

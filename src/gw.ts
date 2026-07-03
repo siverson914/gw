@@ -113,6 +113,26 @@ function emit(kind: 'CD' | 'CD_AND_LAUNCH' | 'NONE', dir = '', b64prompt = '', b
 }
 const b64 = (s: string): string => Buffer.from(s, 'utf-8').toString('base64');
 
+// Prepend a short preamble to the seed prompt so the agent treats the session name as a
+// LABEL, not a task. The worktree/tab name (`id`, e.g. WT-007-cli-parser-flags) is derived
+// FROM the prompt and shown in the agent's terminal tab; without this framing, agents
+// sometimes read the name (say "fix-login-bug") as an instruction ("fix it") and skip the
+// scoping in the real message (which might be "investigate, only fix if it's a real bug").
+// The user's text rides verbatim below a fence so it's unmistakably THE task. Only used when
+// there's a seed prompt — a plain (promptless) session is launched without any wrapper.
+function wrapPrompt(id: string, prompt: string): string {
+  return [
+    `You're in an isolated git worktree for one of several parallel sessions, labeled "${id}".`,
+    'That label is only a short tag to tell sessions apart at a glance. It was auto-generated',
+    "from the task and is NOT an instruction — it may be vague, narrow, or wrong, so don't act",
+    'on it. Your task is exactly the message below the line: follow its wording and scope (if it',
+    "says investigate, investigate — don't assume a fix is wanted unless it asks for one).",
+    '',
+    '─── task ───',
+    prompt,
+  ].join('\n');
+}
+
 // Agents record MCP-server approval per absolute project path, so every fresh session
 // worktree (a brand-new path it's never seen) would re-prompt to approve servers on
 // launch. Pre-seed the session's local settings with the servers declared in the root
@@ -209,7 +229,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')}${model ? ` on ${model}` : ''}`);
   seedMcpApproval(sessionDir(WORKTREES_DIR, id));
   const launcher = model ? [...WS.launcher, '--model', model] : WS.launcher;
-  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(prompt) : '', b64(launcher.join(' ')));
+  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join(' ')));
 }
 
 // Resolve which session a `done`/`abort` acts on: an explicit positional session-id wins,
