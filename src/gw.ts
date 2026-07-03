@@ -57,7 +57,7 @@ import {
   ensureSession, removeSession, listSessions, resolveSessionFromCwd,
   assertIsolatedSession, isSessionWorktree, type RepoKey, type RunResult,
   sessionDir, sessionRepoDir, withRepoLandLock, withGateLock, stagedLinkPaths,
-  landTmpRoot, landTmpDir, sweepLandTmp, lastActiveLabel,
+  landTmpRoot, landTmpDir, sweepLandTmp, activityLabel,
 } from './lib/worktrees.js';
 import { promptBox } from './lib/prompt-box.js';
 import {
@@ -800,20 +800,36 @@ async function cmdStatus(): Promise<void> {
 
 // ── ready: the "done-done" check ─────────────────────────────────────────────
 
-/** Most recent moment anything happened on a session's branch, as a unix timestamp
- *  (seconds) — the max across its repo worktrees. Returns null if no repo has a
+/** When a session started and when anything last happened in it, as unix timestamps
+ *  (seconds), across its repo worktrees. Start = the OLDEST branch-reflog entry
+ *  (branch creation). Last = the newest reflog entry OR the newest mtime of a
+ *  dirty/untracked file, whichever is later — the reflog alone only moves on
+ *  commits/resets, so a session with purely uncommitted edits would otherwise
+ *  report its creation time as its last activity. Nulls when no repo has a
  *  readable reflog. The session branch tip COMMIT date is the wrong signal (an
  *  unchanged session points at the base commit, which can predate the session). */
-async function sessionLastActivity(session: string): Promise<number | null> {
-  let newest: number | null = null;
+async function sessionActivity(session: string): Promise<{ start: number | null; last: number | null }> {
+  let start: number | null = null, last: number | null = null;
+  const bump = (ts: number) => { if (last === null || ts > last) last = ts; };
   for (const repo of REPO_KEYS) {
     const wt = sessionRepoDir(WORKTREES_DIR, session, repo);
     if (!fs.existsSync(path.join(wt, '.git'))) continue;
-    const reflog = await gitOut(wt, ['reflog', 'show', '--date=unix', `gw/${session}`]);
-    const m = reflog.split('\n').find(Boolean)?.match(/@\{(\d+)\}/);
-    if (m) { const ts = parseInt(m[1], 10); if (newest === null || ts > newest) newest = ts; }
+    const reflog = (await gitOut(wt, ['reflog', 'show', '--date=unix', `gw/${session}`])).split('\n').filter(Boolean);
+    const newest = reflog[0]?.match(/@\{(\d+)\}/);
+    const oldest = reflog[reflog.length - 1]?.match(/@\{(\d+)\}/);
+    if (newest) bump(parseInt(newest[1], 10));
+    if (oldest) { const ts = parseInt(oldest[1], 10); if (start === null || ts < start) start = ts; }
+    // Uncommitted work: the newest mtime among dirty/untracked paths. -z so paths
+    // with spaces parse; a rename entry carries a second (origin) path — skip it.
+    const porcelain = (await gitOut(wt, ['status', '--porcelain', '-z'])).split('\0').filter(Boolean);
+    for (let i = 0; i < porcelain.length; i++) {
+      const entry = porcelain[i];
+      if (entry.length < 4) continue;
+      if (entry[0] === 'R' || entry[0] === 'C') i++; // consume the rename/copy origin path
+      try { bump(Math.floor(fs.lstatSync(path.join(wt, entry.slice(3))).mtimeMs / 1000)); } catch { /* vanished mid-scan */ }
+    }
   }
-  return newest;
+  return { start, last };
 }
 
 /** Per-session unlanded summary: untracked counts here (unlike `status`) because a
@@ -841,7 +857,8 @@ async function cmdReady(): Promise<void> {
   const sessions = listSessions(WORKTREES_DIR);
   for (const session of sessions) {
     const unlanded = await sessionUnlanded(session);
-    const age = lastActiveLabel(await sessionLastActivity(session), nowSec);
+    const act = await sessionActivity(session);
+    const age = activityLabel(act.start, act.last, nowSec);
     if (unlanded.length) {
       console.log(`!! ${session} — ${unlanded.join('; ')}${age}`);
       problems.push(`${session} has unlanded work — finish it (gw start ${session}, then /done) or discard it (gw abort ${session}).`);
@@ -921,8 +938,8 @@ async function cmdPrune(flags: Flags): Promise<void> {
   const removable: string[] = [];
   for (const session of sessions) {
     const unlanded = await sessionUnlanded(session);
-    const last = await sessionLastActivity(session);
-    const age = lastActiveLabel(last, nowSec);
+    const { start, last } = await sessionActivity(session);
+    const age = activityLabel(start, last, nowSec);
     if (unlanded.length) { console.log(`keep ${session} — has unlanded work: ${unlanded.join('; ')}${age}`); continue; }
     const ageSec = last === null ? Infinity : nowSec - last;
     if (ageSec < minAge) { console.log(`keep ${session} — landed/idle but too recent${age}`); continue; }

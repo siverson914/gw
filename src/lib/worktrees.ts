@@ -83,11 +83,18 @@ export function fmtAge(tsSec: number, nowSec: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-/** "last active 2026-06-11 08:43 (2d)" — empty string when no timestamp is
- *  available, so callers can append it unconditionally. */
-export function lastActiveLabel(tsSec: number | null, nowSec: number): string {
-  if (tsSec === null) return '';
-  return ` — last active ${fmtStamp(tsSec)} (${fmtAge(tsSec, nowSec)})`;
+/** Session lifetime label: " — started 2026-07-01 09:12 (2d), last active
+ *  2026-07-03 08:05 (1h)". Start and last-active are DIFFERENT signals (branch
+ *  creation vs newest edit/commit) — showing only one hid the other: a session
+ *  with uncommitted-but-never-committed work used to report its creation time as
+ *  "last active". When the two coincide (nothing touched since creation) the
+ *  label collapses to "started … , untouched since". Empty string when no
+ *  timestamp is available, so callers can append it unconditionally. */
+export function activityLabel(startSec: number | null, lastSec: number | null, nowSec: number): string {
+  if (startSec === null && lastSec === null) return '';
+  if (startSec === null) return ` — last active ${fmtStamp(lastSec!)} (${fmtAge(lastSec!, nowSec)})`;
+  if (lastSec === null || lastSec - startSec < 60) return ` — started ${fmtStamp(startSec)} (${fmtAge(startSec, nowSec)}), untouched since`;
+  return ` — started ${fmtStamp(startSec)} (${fmtAge(startSec, nowSec)}), last active ${fmtStamp(lastSec)} (${fmtAge(lastSec, nowSec)})`;
 }
 
 // LLM-assisted session title: ask the configured `namer` command (default
