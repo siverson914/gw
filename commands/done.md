@@ -9,7 +9,9 @@ Finish this `gw` session. Land every repo you changed **with a real, descriptive
 GW_ROOT="__GW_ROOT__" __GW_TSX__ "__GW_TS__" done --show --in-claude $ARGUMENTS
 ```
 
-This prints, per changed repo, the net diff (committed work plus uncommitted edits) vs that repo's base branch. It stages, gates, and merges **nothing**. If it reports `no changes to land`, stop — there's nothing to finish.
+This prints, per changed repo, the net diff (committed work plus uncommitted edits) **this session authored** — measured against the merge base, so it is only ever your own work. It stages, gates, and merges **nothing**. If it reports `no changes to land`, stop — there's nothing to finish.
+
+Everything in that diff is yours. If it shows a file you don't recognize being deleted, or a change you're sure you didn't make, **do not write a commit message describing it** — treat it as a bug in your understanding and investigate (`git -C <worktree> log --oneline origin/<base>...HEAD`). A `branch is N commit(s) behind origin/<base>` note means someone else landed work after you forked; that work is deliberately absent from the diff, and Step 3 merges it in for you. It is never something you are reverting.
 
 **Step 2 — compose the commit message** from that diff and what you did this session, in Conventional-Commits form. The subject must read well in `git log --oneline`; the body carries the detail someone gets on open:
 - **Subject** ≤ 72 chars, imperative mood: `type(scope): summary` (e.g. `fix(gw): survive a deleted cwd`, `feat(cli): add --json output`). One scope; pick the dominant one.

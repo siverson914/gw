@@ -403,15 +403,25 @@ async function showSessionDiff(session: string, branch: string): Promise<void> {
     if (!(await isSessionWorktree(wt, REPOS[repo].dir, branch))) continue;
     const base = REPOS[repo].base;
     await git(wt, ['fetch', 'origin', base]); // refresh origin/<base> so the diff is current
+    // Diff against the MERGE BASE, never the tip of origin/<base>. A two-dot diff vs the
+    // tip renders every commit that landed on <base> after this branch forked as a
+    // DELETION of code this session never touched: a stale branch's preview reads as a
+    // large destructive revert, and a commit message composed from it describes work that
+    // never happened. The merge base shows exactly what this session authored — which is
+    // exactly what lands. Once `gw done` has merged origin/<base> in, the merge base IS
+    // the tip and this degrades to the old behavior.
+    const mergeBase = await gitOut(wt, ['merge-base', `origin/${base}`, 'HEAD']) || `origin/${base}`;
+    const behind = parseInt(await gitOut(wt, ['rev-list', '--count', `HEAD..origin/${base}`]) || '0', 10);
     // Intent-to-add (-N) makes new untracked files show up in the diff; the mixed reset
     // afterward clears the index entries again, leaving the working tree untouched.
     await git(wt, ['add', '-AN']);
-    const stat = await gitOut(wt, ['diff', '--stat', `origin/${base}`]);
-    const full = await gitOut(wt, ['diff', `origin/${base}`]);
+    const stat = await gitOut(wt, ['diff', '--stat', mergeBase]);
+    const full = await gitOut(wt, ['diff', mergeBase]);
     await git(wt, ['reset', '-q']);
     if (!stat) continue;
     any = true;
-    process.stdout.write(`\n=== ${repo} (base ${base}) ===\n${stat}\n\n${full}\n`);
+    if (behind) log(`[${repo}] branch is ${behind} commit(s) behind origin/${base}. The diff below is this session's OWN changes (vs the merge base), so it excludes that newer ${base} work — it is not a revert of it. gw done merges origin/${base} in before it gates and lands.`);
+    process.stdout.write(`\n=== ${repo} (base ${base}${behind ? `, ${behind} behind — diff is vs merge base` : ''}) ===\n${stat}\n\n${full}\n`);
   }
   if (!any) log(`no changes to land in ${session}.`);
 }
@@ -434,7 +444,9 @@ async function fallbackMessage(wt: string, base: string, name: string): Promise<
   if (meaningful.length === 1) return meaningful[0];
   if (meaningful.length > 1) return `${meaningful[0]}\n\n${meaningful.slice(1).map((s) => `- ${s}`).join('\n')}`;
 
-  const files = (await gitOut(wt, ['diff', '--name-only', `origin/${base}..HEAD`])).split('\n').filter(Boolean);
+  // Three dots: the branch's OWN files. `git diff A..B` means `git diff A B` (tip to
+  // tip), which on a branch behind <base> would name files only <base> touched.
+  const files = (await gitOut(wt, ['diff', '--name-only', `origin/${base}...HEAD`])).split('\n').filter(Boolean);
   if (!files.length) return name;
   const dirs = [...new Set(files.map((f) => f.split('/')[0]))];
   const where = dirs.length === 1 ? dirs[0] : `${dirs.length} areas`;

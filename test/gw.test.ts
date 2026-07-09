@@ -168,6 +168,29 @@ test('a session path that resolves to a real checkout is never staged or destroy
   assert.equal(git(fx.co('a'), ['show', 'HEAD:README.md']), '# a');
 });
 
+test('done --show on a STALE branch previews only this session\'s work, never a revert of newer base commits', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const id = await startSession(fx);
+  fs.writeFileSync(path.join(fx.wt(id, 'a'), 'mine.txt'), 'mine\n'); // this session's work
+
+  // Someone else lands on origin/main AFTER this branch forked. A two-dot diff vs the
+  // tip of origin/main would render their commit backwards, as deletions — an agent
+  // reading that preview writes a commit message describing a revert that never happened.
+  fs.writeFileSync(path.join(fx.co('a'), 'theirs.txt'), 'theirs\n');
+  git(fx.co('a'), ['add', '-A']);
+  git(fx.co('a'), ['commit', '-q', '-m', 'feat: theirs']);
+  git(fx.co('a'), ['push', '-q', 'origin', 'main']);
+
+  const r = await gw(fx, ['done', id, '--show']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /mine\.txt/, "the session's own file must appear");
+  assert.doesNotMatch(r.stdout, /theirs\.txt/, "a newer base commit must NEVER appear in the preview");
+  assert.doesNotMatch(r.stdout, /^-theirs$/m, 'and must never render as a deletion');
+  assert.match(r.stderr, /1 commit\(s\) behind origin\/main/, 'staleness must be surfaced, not silent');
+  assert.ok(fs.existsSync(fx.sessionDir(id)), '--show must land nothing');
+  assert.equal(git(fx.origin('a'), ['log', '-1', '--format=%s', 'main']), 'feat: theirs', '--show must push nothing');
+});
+
 // ── abort safety ─────────────────────────────────────────────────────────────
 
 test('abort --in-claude refuses unlanded work without --yes, discards with it', async () => {
