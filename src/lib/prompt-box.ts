@@ -1,21 +1,29 @@
 /**
  * prompt-box — a tiny, zero-dependency terminal editor used by `gw start`.
  *
- * Draws a bordered multi-line edit box with [Go] / [Cancel] buttons:
+ * Draws a bordered multi-line edit box, an optional one-line choice row (the
+ * model picker), and [Go] / [Cancel] buttons:
  *
  *   Enter starting prompt: (empty = plain session)
  *   ╭──────────────────────────────────────────╮
  *   │ fix the thing where…█                    │
  *   │                                          │
  *   ╰──────────────────────────────────────────╯
+ *    Model:  fable   opus  ▐sonnet▌  haiku
  *    [ Go ]  [ Cancel ]
- *    Tab: buttons · Enter: newline · Ctrl+D: Go · Ctrl+C: cancel
+ *    Tab: move · Enter: newline · Ctrl+D: Go · Ctrl+C: cancel
  *
- * Editing: arrows / Home / End / PgUp / PgDn move (soft-wrapped display with a
- * scrolling viewport, so huge pastes are fine), Backspace/Delete, Ctrl+A/E
- * (home/end), Ctrl+K (kill to end of line), Ctrl+U (kill to start of line).
- * Tab / Shift+Tab cycle focus edit → Go → Cancel; Enter on a button fires it.
- * Typing while a button is focused jumps back into the editor.
+ * Tab / Shift+Tab cycle focus edit → model → Go → Cancel; on the model row ←/→
+ * (or a letter, or 1-9) pick and Enter advances to [Go]. So the flow reads top to
+ * bottom: write the prompt, choose the model, Go. Typing while a button is focused
+ * jumps back into the editor.
+ *
+ * Editing: soft word wrap at spaces (a word only splits when it can't fit a row),
+ * arrows / Home / End / PgUp / PgDn move, Ctrl/Alt+←/→ (and Alt+B/F) move by word,
+ * Ctrl+Home/End jump to start/end of the whole prompt, Backspace/Delete,
+ * Ctrl+W / Alt+Backspace (kill word left), Ctrl+A/E (row home/end), Ctrl+K (kill to
+ * end of line), Ctrl+U (kill to start of line), Ctrl+Z / Ctrl+Y (undo / redo — a run
+ * of typing undoes as one). The display viewport scrolls, so huge pastes are fine.
  *
  * Finish signals, newest to oldest: Enter on [Go]; Ctrl+D; a typed line
  * containing only "." (kept for muscle memory from the pre-box reader — raw
@@ -41,20 +49,39 @@ const DIM = `${ESC}[2m`;
 const INV = `${ESC}[7m`;
 const DEFAULT_ORANGE = `${ESC}[38;2;242;101;34m`; // Porsche Signal Orange #f26522
 
-const ROWS = 8;            // visible editor rows (content scrolls beyond this)
-const BLOCK_H = ROWS + 5;  // header + top border + ROWS + bottom border + buttons + hint
+const ROWS = 8;             // visible editor rows (content scrolls beyond this)
+const BASE_H = ROWS + 5;    // header + top border + ROWS + bottom border + buttons + hint
 const PASTE_END = `${ESC}[201~`;
+const UNDO_MAX = 200;
 
-type Focus = 'edit' | 'go' | 'cancel';
-interface DRow { line: number; start: number; text: string }
+type Focus = 'edit' | 'model' | 'go' | 'cancel';
+interface DRow { line: number; start: number; text: string; last: boolean } // last = final row of its logical line
+interface Snap { lines: string[]; cl: number; cc: number }
 
-export interface PromptBoxOptions { header?: string; maxLen?: number; color?: string }
+export interface PromptBoxChoices {
+  header: string;    // label drawn before the options, e.g. "Model:"
+  options: string[]; // the choices, in display order
+  initial?: number;  // index selected on open (default 0)
+}
+export interface PromptBoxOptions {
+  header?: string;
+  maxLen?: number;
+  color?: string;
+  choices?: PromptBoxChoices; // omit for a plain prompt box with no choice row
+}
+export interface PromptBoxResult {
+  text: string;
+  /** The picked option, or null when the box was built without `choices`. */
+  choice: string | null;
+}
 
-/** Run the editor. Resolves with the (trimmed) text on Go, or null on Cancel. */
-export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
+/** Run the editor. Resolves with the (trimmed) text + choice on Go, or null on Cancel. */
+export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult | null> {
   const header = opts.header ?? 'Enter starting prompt:';
   const maxLen = opts.maxLen ?? 100_000;
   const ORANGE = opts.color ?? DEFAULT_ORANGE;
+  const choices = opts.choices && opts.choices.options.length ? opts.choices : null;
+  const BLOCK_H = BASE_H + (choices ? 1 : 0);
   const stdin = process.stdin;
   const err = process.stderr;
   const w = (s: string): boolean => err.write(s);
@@ -70,26 +97,80 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
   let paste = false;         // inside a bracketed paste
   let drawn = false;
   let done = false;
+  let sel = choices ? Math.max(0, Math.min(choices.options.length - 1, choices.initial ?? 0)) : 0;
+  const undo: Snap[] = [], redo: Snap[] = [];
+  let lastKind = '';         // edit kind of the previous mutation, for undo coalescing
 
   const isHigh = (c: string | undefined): boolean => c !== undefined && c >= '\ud800' && c <= '\udbff';
   const isLow = (c: string | undefined): boolean => c !== undefined && c >= '\udc00' && c <= '\udfff';
   const text = (): string => lines.join('\n');
 
-  // ── layout: soft-wrap logical lines into display rows of width W ──
+  // ── undo ──
+  // A snapshot per mutation, except that a run of same-kind edits (typing char after
+  // char, backspacing over a word) coalesces into one entry — so Ctrl+Z undoes the run,
+  // not one keystroke. Snapshots are whole-buffer copies: simple, and at a 100k cap the
+  // memory is irrelevant next to the terminal it's drawn in.
+  function mark(kind: string): void {
+    redo.length = 0;
+    if (kind !== '' && kind === lastKind) return;
+    lastKind = kind;
+    undo.push({ lines: lines.slice(), cl, cc });
+    if (undo.length > UNDO_MAX) undo.shift();
+  }
+  function restoreSnap(from: Snap[], to: Snap[]): void {
+    const s = from.pop();
+    if (!s) return;
+    to.push({ lines: lines.slice(), cl, cc });
+    lines = s.lines.slice(); cl = s.cl; cc = s.cc;
+    lastKind = ''; // the next edit always starts a fresh coalescing run
+  }
+
+  // ── layout: soft-wrap logical lines into display rows of width W, breaking at
+  // spaces where possible (a word longer than a row still hard-breaks at W) ──
   const innerW = (): number => Math.max(20, (err.columns || 80) - 4);
   function layout(W: number): DRow[] {
     const rows: DRow[] = [];
     for (let li = 0; li < lines.length; li++) {
       const s = lines[li];
-      const n = Math.floor(s.length / W) + 1; // always ≥1; an exactly-full row gets an empty tail row so the cursor can sit past it
-      for (let k = 0; k < n; k++) rows.push({ line: li, start: k * W, text: s.slice(k * W, (k + 1) * W) });
+      let pos = 0;
+      do {
+        let end: number;
+        if (s.length - pos <= W) end = s.length;
+        else {
+          // Break AFTER the last space that still fits, so the space stays on this row
+          // and the next row starts on a word. No space in reach → hard break at W.
+          end = -1;
+          for (let i = pos + W - 1; i > pos; i--) if (s[i] === ' ') { end = i + 1; break; }
+          if (end <= pos) end = pos + W;
+        }
+        rows.push({ line: li, start: pos, text: s.slice(pos, end), last: end >= s.length });
+        pos = end;
+      } while (pos < s.length);
+      // A last row that exactly fills the width leaves the end-of-line cursor with
+      // nowhere to sit — give it an empty tail row.
+      const tail = rows[rows.length - 1];
+      if (tail.text.length === W) { tail.last = false; rows.push({ line: li, start: s.length, text: '', last: true }); }
     }
     return rows;
   }
-  function cursorRC(W: number): [number, number] {
-    let base = 0;
-    for (let li = 0; li < cl; li++) base += Math.floor(lines[li].length / W) + 1;
-    return [base + Math.floor(cc / W), cc % W];
+  /** Display row index of the cursor: the LAST row of its line starting at or before cc. */
+  function cursorRow(lay: DRow[]): number {
+    let r = 0;
+    for (let i = 0; i < lay.length; i++) {
+      if (lay[i].line < cl) continue;
+      if (lay[i].line > cl) break;
+      if (lay[i].start <= cc) r = i;
+    }
+    return r;
+  }
+  function cursorRC(lay: DRow[]): [number, number] {
+    const r = cursorRow(lay);
+    return [r, cc - lay[r].start];
+  }
+  /** Rightmost column the cursor may occupy on a row: past the text on a line's final
+   *  row, else just past its last non-space char (the wrap point IS the next row's col 0). */
+  function maxCol(row: DRow): number {
+    return row.last ? row.text.length : row.text.replace(/ +$/, '').length;
   }
 
   // ── edits ──
@@ -126,18 +207,47 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
     if (cc < s.length) cc += isHigh(s[cc]) && cc + 1 < s.length ? 2 : 1;
     else if (cl < lines.length - 1) { cl++; cc = 0; }
   }
+  // Word motion: back over any run of spaces, then over the word itself (and across a
+  // line break when already at an edge) — the shell/editor convention.
+  function wordLeftCol(): number {
+    const s = lines[cl];
+    let i = cc;
+    while (i > 0 && s[i - 1] === ' ') i--;
+    while (i > 0 && s[i - 1] !== ' ') i--;
+    return i;
+  }
+  function wordLeft(): void {
+    if (cc === 0) { moveLeft(); return; }
+    cc = wordLeftCol();
+  }
+  function wordRight(): void {
+    const s = lines[cl];
+    if (cc === s.length) { moveRight(); return; }
+    let i = cc;
+    while (i < s.length && s[i] === ' ') i++;
+    while (i < s.length && s[i] !== ' ') i++;
+    cc = i;
+  }
+  function killWordLeft(): void {
+    if (cc === 0) { backspace(); return; }
+    const i = wordLeftCol();
+    lines[cl] = lines[cl].slice(0, i) + lines[cl].slice(cc);
+    cc = i;
+  }
   function moveVert(dy: number): void {
-    const W = innerW(), lay = layout(W), [r, x] = cursorRC(W);
+    const lay = layout(innerW()), [r, x] = cursorRC(lay);
     const row = lay[Math.max(0, Math.min(lay.length - 1, r + dy))];
     cl = row.line;
-    cc = Math.min(row.start + x, row.start + row.text.length);
+    cc = row.start + Math.min(x, maxCol(row));
   }
-  function rowHome(): void { const W = innerW(); cc = Math.floor(cc / W) * W; }
-  function rowEnd(): void { const W = innerW(); cc = Math.min(Math.floor(cc / W) * W + W, lines[cl].length); }
+  function rowHome(): void { const lay = layout(innerW()); cc = lay[cursorRow(lay)].start; }
+  function rowEnd(): void { const lay = layout(innerW()), row = lay[cursorRow(lay)]; cc = row.start + maxCol(row); }
+  function docHome(): void { cl = 0; cc = 0; }
+  function docEnd(): void { cl = lines.length - 1; cc = lines[cl].length; }
 
   // ── render: redraw the whole fixed-height block in place ──
   function render(): void {
-    const W = innerW(), lay = layout(W), [cr, cx] = cursorRC(W);
+    const W = innerW(), lay = layout(W), [cr, cx] = cursorRC(lay);
     if (cr < top) top = cr;
     if (cr >= top + ROWS) top = cr - ROWS + 1;
     top = Math.max(0, Math.min(top, Math.max(0, lay.length - ROWS)));
@@ -160,10 +270,17 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
     const n = text().length;
     const info = n ? ` ${lay.length > ROWS ? `row ${cr + 1}/${lay.length} · ` : ''}${n.toLocaleString('en-US')} chars${truncated ? ` · TRUNCATED at ${maxLen.toLocaleString('en-US')}` : ''} ` : '';
     out.push(`${ORANGE}╰${'─'.repeat(Math.max(0, W - info.length))}${RESET}${DIM}${info}${RESET}${ORANGE}──╯${RESET}`);
+    if (choices) {
+      const opts = choices.options.map((o, i) =>
+        i !== sel ? `${DIM} ${o} ${RESET}`
+          : focus === 'model' ? `${ORANGE}${INV}${BOLD} ${o} ${RESET}`
+            : `${ORANGE}${BOLD} ${o} ${RESET}`);
+      out.push(`  ${focus === 'model' ? BOLD : DIM}${choices.header}${RESET} ${opts.join(' ')}${focus === 'model' ? `  ${DIM}←/→ · Enter${RESET}` : ''}`);
+    }
     const btn = (label: string, focused: boolean): string =>
       focused ? `${ORANGE}${INV}${BOLD} ${label} ${RESET}` : `${DIM}[${RESET} ${label} ${DIM}]${RESET}`;
     out.push(`  ${btn('Go', focus === 'go')}  ${btn('Cancel', focus === 'cancel')}`);
-    out.push(`${DIM}Tab: buttons · Enter: newline · Ctrl+D: Go · Ctrl+C: cancel${RESET}`);
+    out.push(`${DIM}Tab: move · Enter: newline · Ctrl+Z: undo · Ctrl+D: Go · Ctrl+C: cancel${RESET}`);
 
     w(`${drawn ? `${ESC}[${BLOCK_H}A` : ''}${out.map((l) => `\r${ESC}[2K${l}`).join('\n')}\n`);
     drawn = true;
@@ -171,11 +288,12 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
 
   // ── input: parse one ESC sequence from the head of buf ──
   // Returns null while the sequence is still incomplete (wait for more bytes);
-  // key '' means "recognized and swallowed" (Alt-chords, runaway sequences).
+  // key '' means "recognized and swallowed" (runaway sequences). An ESC followed by a
+  // plain char is an Alt-chord and comes back as key "\x1b<char>".
   function parseEsc(buf: string): { consume: number; key: string } | null {
     if (buf.length < 2) return null;
     const c1 = buf[1];
-    if (c1 !== '[' && c1 !== 'O') return { consume: 2, key: '' };
+    if (c1 !== '[' && c1 !== 'O') return { consume: 2, key: `${ESC}${c1}` };
     let i = 2, params = '';
     while (i < buf.length) {
       const code = buf.charCodeAt(i);
@@ -186,14 +304,18 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
     return null;
   }
 
-  return new Promise<string | null>((resolve) => {
+  const cycle: Focus[] = choices ? ['edit', 'model', 'go', 'cancel'] : ['edit', 'go', 'cancel'];
+  const step = (d: number): void => { focus = cycle[(cycle.indexOf(focus) + d + cycle.length) % cycle.length]; };
+  const pick = (d: number): void => { if (choices) sel = (sel + d + choices.options.length) % choices.options.length; };
+
+  return new Promise<PromptBoxResult | null>((resolve) => {
     // Restore the terminal on EVERY exit path — including a crash — so a bug here
     // can never leave the user's shell in raw/paste mode with a hidden cursor.
     const restore = (): void => {
       try { stdin.setRawMode(false); } catch { /* already closed */ }
       w(`${ESC}[?2004l${ESC}[?25h`);
     };
-    const finish = (result: string | null): void => {
+    const finish = (result: PromptBoxResult | null): void => {
       if (done) return;
       done = true;
       stdin.removeListener('data', onData);
@@ -203,29 +325,50 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
       stdin.pause();
       resolve(result);
     };
-    const submit = (): void => finish(text().slice(0, maxLen).trim());
+    const submit = (): void => finish({
+      text: text().slice(0, maxLen).trim(),
+      choice: choices ? choices.options[sel] : null,
+    });
 
     function key(k: string): void {
-      // CSI keys, modifiers ignored: '[1;5C' (Ctrl+→) acts as '[C'.
+      // Alt-chords: word motion / word kill, the readline bindings.
+      if (k[0] === ESC) {
+        const c = k[1].toLowerCase();
+        if (focus !== 'edit') return;
+        if (c === 'b') { wordLeft(); return; }
+        if (c === 'f') { wordRight(); return; }
+        if (c === '\x7f' || c === '\b') { mark('killword'); killWordLeft(); return; } // Alt+Backspace
+        return;
+      }
+      // CSI keys. A modifier param (';5' Ctrl, ';3' Alt, ';7' Ctrl+Alt) turns the arrow
+      // and Home/End keys into their word / whole-prompt variants.
+      const mod = k.slice(1, -1).split(';')[1] ?? '';
+      const jump = mod === '3' || mod === '5' || mod === '7';
       if (k.endsWith('~')) {
         switch (k.slice(1, -1).split(';')[0]) {
-          case '1': case '7': rowHome(); return;
-          case '4': case '8': rowEnd(); return;
-          case '3': focus = 'edit'; del(); return;
-          case '5': moveVert(-ROWS); return;
-          case '6': moveVert(ROWS); return;
+          case '1': case '7': if (focus === 'edit') { if (jump) docHome(); else rowHome(); } return;
+          case '4': case '8': if (focus === 'edit') { if (jump) docEnd(); else rowEnd(); } return;
+          case '3': focus = 'edit'; mark('del'); del(); return;
+          case '5': if (focus === 'edit') moveVert(-ROWS); return;
+          case '6': if (focus === 'edit') moveVert(ROWS); return;
           case '200': paste = true; return;
           default: return;
         }
       }
       switch (k[k.length - 1]) {
-        case 'A': if (focus === 'edit') moveVert(-1); else focus = 'edit'; return;
-        case 'B': if (focus === 'edit') moveVert(1); return;
-        case 'C': if (focus === 'edit') moveRight(); else focus = 'cancel'; return;
-        case 'D': if (focus === 'edit') moveLeft(); else focus = 'go'; return;
-        case 'H': rowHome(); return;
-        case 'F': rowEnd(); return;
-        case 'Z': focus = focus === 'edit' ? 'cancel' : focus === 'cancel' ? 'go' : 'edit'; return; // Shift+Tab
+        case 'A': if (focus === 'edit') moveVert(-1); else step(-1); return;                     // ↑
+        case 'B': if (focus === 'edit') moveVert(1); else step(1); return;                       // ↓
+        case 'C': if (focus === 'edit') { if (jump) wordRight(); else moveRight(); }             // →
+          else if (focus === 'model') pick(1);
+          else focus = 'cancel';
+          return;
+        case 'D': if (focus === 'edit') { if (jump) wordLeft(); else moveLeft(); }               // ←
+          else if (focus === 'model') pick(-1);
+          else focus = 'go';
+          return;
+        case 'H': if (focus === 'edit') { if (jump) docHome(); else rowHome(); } return;
+        case 'F': if (focus === 'edit') { if (jump) docEnd(); else rowEnd(); } return;
+        case 'Z': step(-1); return;                                                              // Shift+Tab
         default: return;
       }
     }
@@ -234,21 +377,37 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
       const code = ch.codePointAt(0)!;
       if (code === 3) return finish(null);                              // Ctrl+C
       if (code === 4) return submit();                                  // Ctrl+D
-      if (code === 9) { focus = focus === 'edit' ? 'go' : focus === 'go' ? 'cancel' : 'edit'; return; } // Tab
+      if (code === 9) { step(1); return; }                              // Tab
       if (code === 13 || code === 10) {                                 // Enter
         if (focus === 'go') return submit();
         if (focus === 'cancel') return finish(null);
+        if (focus === 'model') { focus = 'go'; return; }                // picked — step to [Go]
         // Lone "." just typed = finish (compat with the pre-box reader).
         if (lines[cl] === '.' && cc === 1) { lines.splice(cl, 1); if (!lines.length) lines = ['']; cl = Math.max(0, cl - 1); cc = lines[cl].length; return submit(); }
-        insertText('\n'); return;
+        mark('nl'); insertText('\n'); return;
+      }
+      if (focus === 'model') {                                          // choose without leaving the row
+        const opts = choices!.options;
+        if (ch >= '1' && ch <= '9') { const i = code - 49; if (i < opts.length) sel = i; return; }
+        const c = ch.toLowerCase();
+        if (c >= 'a' && c <= 'z') { // jump to the NEXT option with this initial (cycling)
+          for (let d = 1; d <= opts.length; d++) {
+            const i = (sel + d) % opts.length;
+            if (opts[i].toLowerCase().startsWith(c)) { sel = i; return; }
+          }
+        }
+        return;
       }
       if (focus !== 'edit' && code >= 32) focus = 'edit';               // typing returns to the editor
-      if (code === 127 || code === 8) { backspace(); return; }
+      if (code === 127 || code === 8) { mark('bs'); backspace(); return; }
+      if (code === 23) { mark('killword'); killWordLeft(); return; }    // Ctrl+W
+      if (code === 26) { restoreSnap(undo, redo); return; }             // Ctrl+Z
+      if (code === 25) { restoreSnap(redo, undo); return; }             // Ctrl+Y
       if (code === 1) { rowHome(); return; }                            // Ctrl+A
       if (code === 5) { rowEnd(); return; }                             // Ctrl+E
-      if (code === 11) { lines[cl] = lines[cl].slice(0, cc); return; }  // Ctrl+K
-      if (code === 21) { lines[cl] = lines[cl].slice(cc); cc = 0; return; } // Ctrl+U
-      if (code === 9 || code >= 32) insertText(ch);
+      if (code === 11) { mark('kill'); lines[cl] = lines[cl].slice(0, cc); return; }  // Ctrl+K
+      if (code === 21) { mark('kill'); lines[cl] = lines[cl].slice(cc); cc = 0; return; } // Ctrl+U
+      if (code === 9 || code >= 32) { mark('ins'); insertText(ch); }
     }
 
     const onData = (chunk: string): void => {
@@ -256,12 +415,13 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<string | null> {
       while (pend && !done) {
         if (paste) {
           const i = pend.indexOf(PASTE_END);
-          if (i >= 0) { insertText(pend.slice(0, i)); pend = pend.slice(i + PASTE_END.length); paste = false; continue; }
+          if (i >= 0) { mark('paste'); insertText(pend.slice(0, i)); pend = pend.slice(i + PASTE_END.length); paste = false; continue; }
           // Hold back any suffix that could be the start of the end marker.
           let hold = 0;
           for (let k = Math.min(pend.length, PASTE_END.length - 1); k > 0; k--) {
             if (PASTE_END.startsWith(pend.slice(pend.length - k))) { hold = k; break; }
           }
+          mark('paste');
           insertText(pend.slice(0, pend.length - hold));
           pend = pend.slice(pend.length - hold);
           break;

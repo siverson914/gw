@@ -18,9 +18,10 @@
  *   gw start [prompt]   put EVERY repo on a fresh `gw/<name>` branch off origin/<base>,
  *                       then the shell cd's into <root>/.worktrees/<id> and launches
  *                       the configured agent — so every repo sits side-by-side and you
- *                       edit any of them in one session. On a TTY, a one-line picker
- *                       chooses the model (opens on the last one used, remembered in
- *                       .gw-last-model at the root). Resuming (an explicit session-id, or
+ *                       edit any of them in one session. On a TTY the prompt box carries
+ *                       a model row under it (write prompt -> pick model -> Go), opening on
+ *                       the last one used, remembered in .gw-last-model at the root.
+ *                       Resuming (an explicit session-id, or
  *                       a bare `gw start` from inside a session worktree) re-enters that
  *                       session and CONTINUES the prior agent conversation by default
  *                       (--no-continue for a clean one; --new forces a brand-new session).
@@ -62,7 +63,6 @@ import {
   landTmpRoot, landTmpDir, sweepLandTmp, activityLabel,
 } from './lib/worktrees.js';
 import { promptBox } from './lib/prompt-box.js';
-import { pickBox } from './lib/pick-box.js';
 import {
   loadWorkspace, hexAnsi, CONFIG_NAME,
   DEFAULT_LAUNCHER, DEFAULT_NAMER, DEFAULT_BRAND,
@@ -161,20 +161,28 @@ function seedMcpApproval(dir: string): void {
 
 // ── interactive input ────────────────────────────────────────────────────────
 
-// Read the seed prompt HERE, never through a shell — so quotes/$/!/backticks in the
-// prompt are taken literally. On a TTY this is the promptBox editor (lib/prompt-box).
-// Returns null if the user cancels; empty text = a plain session.
+// Read the seed prompt (and the model to run it on) HERE, never through a shell — so
+// quotes/$/!/backticks in the prompt are taken literally. On a TTY this is the promptBox
+// editor (lib/prompt-box): write the prompt, pick the model on the row under the box,
+// then Go. Returns null if the user cancels; empty text = a plain session. Piped stdin
+// has no picker — model comes back null and the namer's inference decides.
 const PROMPT_MAX = 100_000;
-async function readPrompt(): Promise<string | null> {
+async function readPrompt(): Promise<{ text: string; model: string | null } | null> {
   const stdin = process.stdin;
   // Piped / heredoc (`gw start < file`, self-tests): consume ALL of stdin.
   if (!stdin.isTTY) {
     stdin.setEncoding('utf8');
     let data = '';
     for await (const chunk of stdin) { data += chunk; if (data.length > PROMPT_MAX) break; }
-    return data.slice(0, PROMPT_MAX).trim();
+    return { text: data.slice(0, PROMPT_MAX).trim(), model: null };
   }
-  return promptBox({ header: 'Enter starting prompt:', maxLen: PROMPT_MAX, color: ORANGE });
+  const res = await promptBox({
+    header: 'Enter starting prompt:', maxLen: PROMPT_MAX, color: ORANGE,
+    choices: { header: 'Model:', options: MODEL_CHOICES, initial: MODEL_CHOICES.indexOf(readLastModel()) },
+  });
+  if (res === null) return null;
+  if (res.choice) saveLastModel(res.choice);
+  return { text: res.text, model: res.choice };
 }
 async function confirm(q: string): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
@@ -185,9 +193,10 @@ async function confirm(q: string): Promise<boolean> {
 
 // ── start ────────────────────────────────────────────────────────────────────
 
-// Model choices for the start-time picker, ordered most→least capable (fable is the
-// Mythos-class tier above opus). They mirror NAMER_MODELS in worktrees.ts — kept to
-// `claude --model` aliases so a choice is always a safe, complete argv token.
+// Model choices for the picker row inside the start prompt box, ordered most→least
+// capable (fable is the Mythos-class tier above opus). They mirror NAMER_MODELS in
+// worktrees.ts — kept to `claude --model` aliases so a choice is always a safe,
+// complete argv token.
 const MODEL_CHOICES = ['fable', 'opus', 'sonnet', 'haiku'];
 // The last picked model, remembered per workspace so the picker opens on it next time.
 // Lives at the root next to .gw-seq (not inside .worktrees/, so per-session cleanup
@@ -207,8 +216,9 @@ function saveLastModel(m: string): void {
 async function cmdStart(flags: Flags): Promise<void> {
   // --echo-prompt: self-test the prompt base64 round-trip, touch nothing else.
   if (flags.echoPrompt) {
-    const p = await readPrompt();
-    if (p === null) { process.stdout.write('CANCELLED\n'); return; }
+    const r = await readPrompt();
+    if (r === null) { process.stdout.write('CANCELLED\n'); return; }
+    const p = r.text;
     const back = Buffer.from(Buffer.from(p, 'utf-8').toString('base64'), 'base64').toString('utf-8');
     process.stdout.write(`MATCH=${back === p}\nPROMPT<<<${p}>>>\n`);
     return;
@@ -238,17 +248,9 @@ async function cmdStart(flags: Flags): Promise<void> {
 
   // Fresh: allocate a sortable WS id (+ slug from the prompt) and branch every repo
   // onto gw/<id> inside its own worktree set, so several sessions run side by side.
-  const prompt = await readPrompt();
-  if (prompt === null) { log('cancelled — no session started.'); emit('NONE'); return; }
-  // Model: on a TTY, a one-line picker (←/→ · Enter) that opens on the last-used
-  // choice. Piped/non-TTY starts (tests, `gw start < file`) skip it and behave as
-  // before.
-  let picked: string | null = null;
-  if (process.stdin.isTTY) {
-    picked = await pickBox({ header: 'Model:', options: MODEL_CHOICES, initial: MODEL_CHOICES.indexOf(readLastModel()), color: ORANGE });
-    if (picked === null) { log('cancelled — no session started.'); emit('NONE'); return; }
-    saveLastModel(picked);
-  }
+  const input = await readPrompt();
+  if (input === null) { log('cancelled — no session started.'); emit('NONE'); return; }
+  const { text: prompt, model: picked } = input;
   if (prompt) log('naming session ...');
   // The namer's one Haiku call also infers a model when the prompt explicitly names
   // one (opus/sonnet/haiku/fable) — the fallback for piped starts, where no picker
