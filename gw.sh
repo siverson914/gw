@@ -41,7 +41,7 @@ gw() {
     [ -z "$root" ] && root="$PWD"
   fi
 
-  # If we're stranded in a deleted worktree (e.g. a prior in-claude `done`/`abort`
+  # If we're stranded in a deleted worktree (e.g. a prior in-agent `done`/`abort`
   # removed the worktree we were sitting in), land somewhere real BEFORE invoking
   # node — tsx/esbuild call process.cwd() at startup and would otherwise die with
   # `uv_cwd ENOENT` before any gw.ts logic runs. Root resolution above is pure
@@ -110,7 +110,7 @@ gw() {
   esac
 
   # `gw done`/`gw abort` delete the session worktree we may be sitting in. The CD
-  # directive normally moves us out, but the --in-claude path emits NONE — leaving the
+  # directive normally moves us out, but an --in-agent path emits NONE — leaving the
   # shell in a deleted cwd, where the next `pwd` fails. Land somewhere real.
   if ! pwd -P >/dev/null 2>&1; then cd "$root" || return 1; fi
 }

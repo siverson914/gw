@@ -1,15 +1,16 @@
 /**
  * prompt-box — a tiny, zero-dependency terminal editor used by `gw start`.
  *
- * Draws a bordered multi-line edit box, an optional one-line choice row (the
- * model picker), and [Go] / [Cancel] buttons:
+ * Draws a bordered multi-line edit box, optional aligned choice rows (the
+ * agent/model picker), and [Go] / [Cancel] buttons:
  *
  *   Enter starting prompt: (empty = plain session)
  *   ╭──────────────────────────────────────────╮
  *   │ fix the thing where…█                    │
  *   │                                          │
  *   ╰──────────────────────────────────────────╯
- *    Model:  fable   opus  ▐sonnet▌  haiku
+ *    Claude:  fable       opus          ▐sonnet▌       haiku
+ *    Codex:   gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna  gpt-5.5  gpt-5.4  gpt-5.4-mini
  *    [ Go ]  [ Cancel ]
  *    Tab: move · Enter: newline · Ctrl+D: Go · Ctrl+C: cancel
  *
@@ -59,8 +60,9 @@ interface DRow { line: number; start: number; text: string; last: boolean } // l
 interface Snap { lines: string[]; cl: number; cc: number }
 
 export interface PromptBoxChoices {
-  header: string;    // label drawn before the options, e.g. "Model:"
-  options: string[]; // the choices, in display order
+  header?: string;    // label for a legacy single row, e.g. "Model:"
+  options?: string[]; // legacy single-row choices
+  rows?: Array<{ header: string; options: string[] }>;
   initial?: number;  // index selected on open (default 0)
 }
 export interface PromptBoxOptions {
@@ -73,6 +75,8 @@ export interface PromptBoxResult {
   text: string;
   /** The picked option, or null when the box was built without `choices`. */
   choice: string | null;
+  /** Flat index across all choice rows. */
+  choiceIndex: number | null;
 }
 
 /** Run the editor. Resolves with the (trimmed) text + choice on Go, or null on Cancel. */
@@ -80,8 +84,12 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   const header = opts.header ?? 'Enter starting prompt:';
   const maxLen = opts.maxLen ?? 100_000;
   const ORANGE = opts.color ?? DEFAULT_ORANGE;
-  const choices = opts.choices && opts.choices.options.length ? opts.choices : null;
-  const BLOCK_H = BASE_H + (choices ? 1 : 0);
+  const choices = opts.choices ?? null;
+  const choiceRows = choices?.rows?.length
+    ? choices.rows.filter(r => r.options.length)
+    : choices?.options?.length ? [{ header: choices.header ?? '', options: choices.options }] : [];
+  const flatChoices = choiceRows.flatMap(r => r.options);
+  const BLOCK_H = BASE_H + choiceRows.length;
   const stdin = process.stdin;
   const err = process.stderr;
   const w = (s: string): boolean => err.write(s);
@@ -97,7 +105,7 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   let paste = false;         // inside a bracketed paste
   let drawn = false;
   let done = false;
-  let sel = choices ? Math.max(0, Math.min(choices.options.length - 1, choices.initial ?? 0)) : 0;
+  let sel = flatChoices.length ? Math.max(0, Math.min(flatChoices.length - 1, choices?.initial ?? 0)) : 0;
   const undo: Snap[] = [], redo: Snap[] = [];
   let lastKind = '';         // edit kind of the previous mutation, for undo coalescing
 
@@ -270,12 +278,22 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     const n = text().length;
     const info = n ? ` ${lay.length > ROWS ? `row ${cr + 1}/${lay.length} · ` : ''}${n.toLocaleString('en-US')} chars${truncated ? ` · TRUNCATED at ${maxLen.toLocaleString('en-US')}` : ''} ` : '';
     out.push(`${ORANGE}╰${'─'.repeat(Math.max(0, W - info.length))}${RESET}${DIM}${info}${RESET}${ORANGE}──╯${RESET}`);
-    if (choices) {
-      const opts = choices.options.map((o, i) =>
-        i !== sel ? `${DIM} ${o} ${RESET}`
-          : focus === 'model' ? `${ORANGE}${INV}${BOLD} ${o} ${RESET}`
-            : `${ORANGE}${BOLD} ${o} ${RESET}`);
-      out.push(`  ${focus === 'model' ? BOLD : DIM}${choices.header}${RESET} ${opts.join(' ')}${focus === 'model' ? `  ${DIM}←/→ · Enter${RESET}` : ''}`);
+    if (choiceRows.length) {
+      const headerW = Math.max(...choiceRows.map(r => r.header.length));
+      const colW = Array.from({ length: Math.max(...choiceRows.map(r => r.options.length)) }, (_, col) =>
+        Math.max(...choiceRows.map(r => r.options[col]?.length ?? 0)));
+      let offset = 0;
+      for (const row of choiceRows) {
+        const opts = row.options.map((o, col) => {
+          const i = offset + col;
+          const padded = o.padEnd(colW[col]);
+          return i !== sel ? `${DIM} ${padded} ${RESET}`
+            : focus === 'model' ? `${ORANGE}${INV}${BOLD} ${padded} ${RESET}`
+              : `${ORANGE}${BOLD} ${padded} ${RESET}`;
+        });
+        out.push(`  ${focus === 'model' ? BOLD : DIM}${row.header.padEnd(headerW)}${RESET} ${opts.join(' ')}${focus === 'model' && offset <= sel && sel < offset + row.options.length ? `  ${DIM}←/→ · ↑/↓ · Enter${RESET}` : ''}`);
+        offset += row.options.length;
+      }
     }
     const btn = (label: string, focused: boolean): string =>
       focused ? `${ORANGE}${INV}${BOLD} ${label} ${RESET}` : `${DIM}[${RESET} ${label} ${DIM}]${RESET}`;
@@ -304,9 +322,28 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     return null;
   }
 
-  const cycle: Focus[] = choices ? ['edit', 'model', 'go', 'cancel'] : ['edit', 'go', 'cancel'];
+  const cycle: Focus[] = flatChoices.length ? ['edit', 'model', 'go', 'cancel'] : ['edit', 'go', 'cancel'];
   const step = (d: number): void => { focus = cycle[(cycle.indexOf(focus) + d + cycle.length) % cycle.length]; };
-  const pick = (d: number): void => { if (choices) sel = (sel + d + choices.options.length) % choices.options.length; };
+  const selectedRC = (): [number, number] => {
+    let offset = 0;
+    for (let row = 0; row < choiceRows.length; row++) {
+      if (sel < offset + choiceRows[row].options.length) return [row, sel - offset];
+      offset += choiceRows[row].options.length;
+    }
+    return [0, 0];
+  };
+  const rowOffset = (row: number): number => choiceRows.slice(0, row).reduce((n, r) => n + r.options.length, 0);
+  const pick = (d: number): void => {
+    if (!flatChoices.length) return;
+    const [row, col] = selectedRC(), n = choiceRows[row].options.length;
+    sel = rowOffset(row) + (col + d + n) % n;
+  };
+  const pickRow = (d: number): void => {
+    if (choiceRows.length < 2) return;
+    const [row, col] = selectedRC();
+    const next = (row + d + choiceRows.length) % choiceRows.length;
+    sel = rowOffset(next) + Math.min(col, choiceRows[next].options.length - 1);
+  };
 
   return new Promise<PromptBoxResult | null>((resolve) => {
     // Restore the terminal on EVERY exit path — including a crash — so a bug here
@@ -327,7 +364,8 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     };
     const submit = (): void => finish({
       text: text().slice(0, maxLen).trim(),
-      choice: choices ? choices.options[sel] : null,
+      choice: flatChoices.length ? flatChoices[sel] : null,
+      choiceIndex: flatChoices.length ? sel : null,
     });
 
     function key(k: string): void {
@@ -356,8 +394,8 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         }
       }
       switch (k[k.length - 1]) {
-        case 'A': if (focus === 'edit') moveVert(-1); else step(-1); return;                     // ↑
-        case 'B': if (focus === 'edit') moveVert(1); else step(1); return;                       // ↓
+        case 'A': if (focus === 'edit') moveVert(-1); else if (focus === 'model') pickRow(-1); else step(-1); return; // ↑
+        case 'B': if (focus === 'edit') moveVert(1); else if (focus === 'model') pickRow(1); else step(1); return;   // ↓
         case 'C': if (focus === 'edit') { if (jump) wordRight(); else moveRight(); }             // →
           else if (focus === 'model') pick(1);
           else focus = 'cancel';
@@ -387,7 +425,7 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         mark('nl'); insertText('\n'); return;
       }
       if (focus === 'model') {                                          // choose without leaving the row
-        const opts = choices!.options;
+        const opts = flatChoices;
         if (ch >= '1' && ch <= '9') { const i = code - 49; if (i < opts.length) sel = i; return; }
         const c = ch.toLowerCase();
         if (c >= 'a' && c <= 'z') { // jump to the NEXT option with this initial (cycling)

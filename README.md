@@ -2,15 +2,16 @@
 
 **Give each task its own set of git worktrees — one per repo, branched together — so a coding agent can make one coherent change across several repos and land it everywhere with a single, can't-lose-work command.**
 
-![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a) ![license](https://img.shields.io/badge/license-MIT-blue) ![status](https://img.shields.io/badge/agent-Claude%20by%20default-f26522)
+![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a) ![license](https://img.shields.io/badge/license-MIT-blue) ![status](https://img.shields.io/badge/agents-Claude%20%2B%20Codex-f26522)
 
 Coding agents are excellent inside one repo. Real changes span three — API + web + worker. The moment a task crosses repos you're back to juggling branches, keeping three checkouts in lockstep, and hoping you didn't land two of the three. `gw` removes that: every unit of work gets a parallel mirror of your workspace, with **every repo on a fresh branch off `origin/<base>`**. The agent edits across all of them in one session; `gw done` gates, squash-merges, and pushes only the repos that actually changed — atomically per repo, idempotent, and built so a failure can't strand your work.
 
 ```
 gw install  →   wire the gw command into your shell (one time, idempotent)
-gw init     →   detect your repos, write config, install slash commands
-gw start    →   type a task; gw branches every repo and launches your agent
-/done       →   gate + squash-merge + push — only the repos you changed
+gw init     →   detect repos, write config, install Claude commands + Codex skills
+gw start    →   type a task; pick Claude or Codex; launch it in generic git worktrees
+/done       →   Claude: gate + squash-merge + push — only changed repos
+$gw-done    →   Codex: the same shared landing workflow
 gw ready    →   "is anything unlanded? safe to deploy?" — one verdict
 ```
 
@@ -42,10 +43,11 @@ gw init          # autodetects repos, remotes, bases, deps & gates → gw.config
 gw start         # type your task → you're now in an isolated, multi-repo session
 ```
 
-…the agent edits across all repos, runs tests, iterates, then:
+…the selected agent edits across all repos, runs tests, iterates, then:
 
 ```
-/done            # inside the agent: gate every changed repo, squash-merge, push
+/done            # Claude Code
+$gw-done         # Codex (both invoke the same gw done implementation)
 ```
 
 `gw status` shows where everything stands; `gw ready` tells you when it's safe to ship.
@@ -98,19 +100,30 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | Command | What it does |
 |---|---|
 | `gw install [--rc <file>] [--print]` | Append `source <clone>/gw.sh` to your shell rc so the `gw` command exists in every shell. Idempotent; uses this clone's absolute path. Run once as `npm run gw install`. |
-| `gw doctor` | Preflight: `git`/`gh`/`node ≥18`/local `tsx`/`claude`, whether the shell is wired up, and whether you're in a workspace. Run it first when something's off. |
-| `gw init [--repo owner/name …] [--force]` | Detect the git repos sitting as siblings here (or clone the ones you name), autodetect each one's remote/base/deps/gate, write `gw.config.json`, install the slash commands. |
-| `gw start [WT-id] [--no-continue] [--new]` | Put **every** repo on a fresh `gw/<id>` branch off `origin/<base>`, open an edit box for your prompt with a model row under it (write the prompt, Tab to the row, ←/→ to pick, Enter to Go — it opens on the last model you used), `cd` into `.worktrees/<id>/`, and launch the agent. Pass a `WT-id` — or just run it from inside a session worktree — to **resume**, which re-enters that session and **continues the prior agent conversation** by default (`--no-continue` starts a clean conversation; `--new` forces a brand-new session even from inside a worktree). |
+| `gw doctor` | Preflight: required tools, optional `claude` and `codex` launchers, shell wiring, and workspace discovery. |
+| `gw init [--repo owner/name …] [--force]` | Detect sibling repos, write `gw.config.json`, and install Claude slash commands plus Codex skills. |
+| `gw start [WT-id] [--no-continue] [--new]` | Branch every repo, open the prompt box with a **Run with** row containing Claude models and Codex, and launch the selection. The choice is saved with the session, so resume uses the same agent. `--agent`/`--model` are available for scripts. |
 | `gw done [--pr] [--no-check] [--quick\|--full] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. `--quick` runs each repo's lighter, diff-scoped `gateQuick` (falling back to the full `gate`, so never *less* safe); `--full` forces the full gate even where a repo sets `gateQuickDefault`. Without `-m`, the message is composed from the branch's own commits (the `/done` skill writes a richer one). |
 | `gw done --show` | Read-only: print the net per-repo diff that would land (the session's own work, vs the merge base with `origin/<base>` — never other people's newer commits, inverted), staging/gating/merging nothing. Used by `/done` to compose the commit message before landing. |
 | `gw status` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. |
 | `gw ready` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
-| `gw abort [WT-id] [--yes]` | Discard a session's branch work in every repo. Base branches are never touched. It first prints exactly what's unlanded; under `--in-claude` (the `/abort` skill) it **refuses** to discard unlanded work unless `--yes` is passed, so an agent can never silently destroy real work. |
+| `gw abort [WT-id] [--yes]` | Discard a session's branch work in every repo. Base branches are never touched. Agent wrappers use `--in-agent`, which refuses to discard unlanded work unless `--yes` is passed, so an agent can never silently destroy real work. |
 | `gw prune [--older-than 2d] [--dry-run]` | Remove fully-landed, idle sessions. |
-| `gw setup` | (Re)install the `/done`, `/abort`, `/donedone` slash commands and sanity-check tools/repos. |
-| `/done`, `/abort`, `/donedone` | The same as `gw done` / `abort` / `ready`, but run **inside the agent** — so a red gate or conflict gets fixed and explained live, then you re-run. |
+| `gw setup` | (Re)install Claude commands and Codex skills, then sanity-check tools/repos. |
+| `/done` or `$gw-done` | Agent-facing wrappers around the same `gw done` engine. Claude also gets `/abort` and `/donedone`; Codex gets `$gw-abort` and `$gw-donedone`. |
 
 Legacy `WS-` session ids created before the `WT-` rename are still resolvable and landable.
+
+The `gw start` picker gives each provider its own independently ordered row:
+
+```text
+Claude:  fable         opus            sonnet          haiku
+Codex:   gpt-5.6-sol   gpt-5.6-terra   gpt-5.6-luna   gpt-5.5   gpt-5.4   gpt-5.4-mini
+```
+
+Left/right changes model within an agent and up/down switches agent rows. The
+layout deliberately makes no cross-provider equivalence claim. Lists and defaults
+remain configurable under `agents`.
 
 ## Safety — gw is built so you can't lose work
 
@@ -120,7 +133,21 @@ Legacy `WS-` session ids created before the `WT-` rename are still resolvable an
 - **Canonical checkouts advance — or say why they didn't.** After a land, gw fast-forwards each shared checkout to `origin/<base>` so the next `gw start` (and any deploy) sees fresh code. It tests **content-level** dirtiness (not just `git status`, which a mtime-only-touched file can trip), so a checkout doesn't get stuck behind origin; when it genuinely can't advance it warns that deploys from there would ship stale code. (See [docs/postmortem-stale-deploy.md](docs/postmortem-stale-deploy.md).)
 - **`gw ready` only ever fast-forwards** (`--ff-only`) a clean checkout — it can never clobber local work.
 
-## How it works (the one bit of plumbing)
+## Worktrees are agent-independent
+
+The directories under `.worktrees/` are ordinary linked Git worktrees. Claude and
+Codex do not create or own them; `gw` creates them before launching either agent.
+Both agents see the same sibling repos, `gw/<WT-id>` branches, Git history,
+dependency links, and configured gates. You can close the agent and edit the
+worktrees by hand without changing how the session lands.
+
+Likewise, `/done` and `$gw-done` are thin agent-specific instruction layers. The
+real implementation is `gw done`: it finds the current session, commits pending
+changes, integrates the latest base, runs every changed repo's gate, squash-merges
+and pushes, then removes the finished worktrees. Its behavior does not depend on
+which agent authored the changes.
+
+## How launching works (the one bit of plumbing)
 
 A script can't change your shell's directory or hand the terminal to an interactive agent — only the shell can (this is why `nvm`, `zoxide`, `direnv` are shell functions). So `gw` is a tiny shell function (`gw.sh`) that calls the real logic in `src/gw.ts`; the script does every git/gh/gate operation, then writes one directive line ("cd here", or "cd here and launch the agent with this prompt") to a temp file the function reads and acts on. Your typed prompt rides base64-encoded so quotes/`$`/`!`/backticks survive untouched, and it's never `eval`'d.
 
@@ -131,8 +158,21 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` �
 ```jsonc
 {
   "base": "main",                                  // default integration branch
-  "launcher": "claude --permission-mode auto",     // how `gw start` launches the agent
-  "resumeArgs": ["--continue"],                    // extra launcher args on resume (continue the prior convo); [] to disable
+  "defaultAgent": "claude",                        // initially selected in the Run with menu
+  "agents": {
+    "claude": {
+      "launcher": "claude --permission-mode auto",
+      "resumeLauncher": "claude --permission-mode auto --continue",
+      "models": ["fable", "opus", "sonnet", "haiku"],
+      "defaultModel": "sonnet"
+    },
+    "codex": {
+      "launcher": "codex",
+      "resumeLauncher": "codex resume --last",
+      "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+      "defaultModel": "gpt-5.6-terra"
+    }
+  },
   "namer": "claude --model haiku",                 // titles each session from its prompt (fallback: plain slug)
   "brandColor": "#f26522",                         // banner + prompt-box accent
   "docker": false,                                 // write .dockerignore into session dirs (linked deps stay out of build contexts)
@@ -155,6 +195,11 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` �
 }
 ```
 
+Existing configs using top-level `launcher` and `resumeArgs` remain valid. Those
+fields are treated as Claude overrides and the built-in Codex option is added
+automatically. Each session saves its selection in
+`.worktrees/<WT-id>/.gw-agent.json`, so resume does not switch providers.
+
 - **`linkPaths`** are symlinked into every worktree so gates can run without re-installing deps. **They must stay gitignored** — gw will never commit *or delete* a linkPath, and warns if one is tracked (a `.env` belongs here, never in git).
 - **`sessionGate`**: `{ "repo": "server", "commands": [["npx","tsx","scripts/build-docs.ts","--check"]] }` — runs from that repo's worktree to catch cross-repo drift (e.g. a generated file) a per-repo gate would miss. Skipped when that repo itself changed (its own gate covers it).
 - **`gateQuick`**: an optional lighter, diff-scoped gate used under `gw done --quick`; without it, `--quick` runs the full `gate` (never *less* safe). Every gate — full or quick — is handed `GW_BASE` (the base ref) and `GW_CHANGED_FILES` (newline-separated paths changed on the branch), so a quick gate can run just the affected tests (e.g. `jest --changedSince=$GW_BASE`).
@@ -167,7 +212,7 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` �
 
 ## Requirements
 
-`git`, `gh` (for `--pr` and `init --repo`), `node` ≥ 18, and `tsx` (installed via `npm install`). The default `launcher`/`namer` use the `claude` CLI; point them at any other agent in `gw.config.json`.
+`git`, `gh` (for `--pr` and `init --repo`), `node` ≥ 18, and `tsx` (installed via `npm install`). Install `claude`, `codex`, or both depending on the menu choices you intend to use. The default namer uses Claude when available and safely falls back to a prompt-derived slug otherwise.
 
 ## License
 

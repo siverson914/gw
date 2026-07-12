@@ -10,17 +10,17 @@
  *   gw install          wire the `gw` shell function into your rc (~/.bashrc or
  *                       ~/.zshrc), idempotently — the one first-run step a child
  *                       process can't do for you. Run once as `npm run gw install`.
- *   gw doctor           preflight: git/gh/node/tsx/claude + whether the shell is
+ *   gw doctor           preflight: git/gh/node/tsx/Claude/Codex + whether the shell is
  *                       wired up + whether you're in a workspace. Run this first.
  *   gw init             scaffold a workspace: detect sibling repos (or clone the
  *                       ones named with --repo), write gw.config.json, install the
- *                       /done, /abort, /donedone slash commands.
+ *                       Claude commands and Codex skills.
  *   gw start [prompt]   put EVERY repo on a fresh `gw/<name>` branch off origin/<base>,
  *                       then the shell cd's into <root>/.worktrees/<id> and launches
  *                       the configured agent — so every repo sits side-by-side and you
  *                       edit any of them in one session. On a TTY the prompt box carries
- *                       a model row under it (write prompt -> pick model -> Go), opening on
- *                       the last one used, remembered in .gw-last-model at the root.
+ *                       a Run-with row under it (write prompt -> pick agent/model -> Go),
+ *                       opening on the last selection used.
  *                       Resuming (an explicit session-id, or
  *                       a bare `gw start` from inside a session worktree) re-enters that
  *                       session and CONTINUES the prior agent conversation by default
@@ -42,7 +42,7 @@
  *                       to deploy.
  *   gw prune            remove fully-landed, idle sessions (nothing a /done would land).
  *                       --older-than <dur>, --dry-run, --yes.
- *   gw setup            (re)install the slash commands and sanity-check tools/repos.
+ *   gw setup            (re)install Claude commands + Codex skills and check tools/repos.
  *
  * Config (gw.config.json at the workspace root) defines the repos, per-repo gates,
  * base branch, launcher, namer, brand color, and optional session gate / warn dirs.
@@ -66,7 +66,7 @@ import { promptBox } from './lib/prompt-box.js';
 import {
   loadWorkspace, hexAnsi, CONFIG_NAME,
   DEFAULT_LAUNCHER, DEFAULT_NAMER, DEFAULT_BRAND,
-  type Workspace, type RawConfig, type RepoCfg,
+  type Workspace, type RawConfig, type RepoCfg, type AgentCfg,
 } from './config.js';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url)); // .../gw/src
@@ -167,22 +167,24 @@ function seedMcpApproval(dir: string): void {
 // then Go. Returns null if the user cancels; empty text = a plain session. Piped stdin
 // has no picker — model comes back null and the namer's inference decides.
 const PROMPT_MAX = 100_000;
-async function readPrompt(): Promise<{ text: string; model: string | null } | null> {
+async function readPrompt(): Promise<{ text: string; choice: LaunchChoice | null } | null> {
   const stdin = process.stdin;
   // Piped / heredoc (`gw start < file`, self-tests): consume ALL of stdin.
   if (!stdin.isTTY) {
     stdin.setEncoding('utf8');
     let data = '';
     for await (const chunk of stdin) { data += chunk; if (data.length > PROMPT_MAX) break; }
-    return { text: data.slice(0, PROMPT_MAX).trim(), model: null };
+    return { text: data.slice(0, PROMPT_MAX).trim(), choice: null };
   }
+  const choices = launchChoices();
   const res = await promptBox({
     header: 'Enter starting prompt:', maxLen: PROMPT_MAX, color: ORANGE,
-    choices: { header: 'Model:', options: MODEL_CHOICES, initial: MODEL_CHOICES.indexOf(readLastModel()) },
+    choices: { rows: launchChoiceRows(choices), initial: initialChoice(choices) },
   });
   if (res === null) return null;
-  if (res.choice) saveLastModel(res.choice);
-  return { text: res.text, model: res.choice };
+  const choice = res.choiceIndex === null ? null : choices[res.choiceIndex];
+  if (choice) saveLastChoice(choice.key);
+  return { text: res.text, choice };
 }
 async function confirm(q: string): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
@@ -193,24 +195,66 @@ async function confirm(q: string): Promise<boolean> {
 
 // ── start ────────────────────────────────────────────────────────────────────
 
-// Model choices for the picker row inside the start prompt box, ordered most→least
-// capable (fable is the Mythos-class tier above opus). They mirror NAMER_MODELS in
-// worktrees.ts — kept to `claude --model` aliases so a choice is always a safe,
-// complete argv token.
-const MODEL_CHOICES = ['fable', 'opus', 'sonnet', 'haiku'];
-// The last picked model, remembered per workspace so the picker opens on it next time.
+interface LaunchChoice { key: string; display: string; agent: string; model: string | null }
+interface SessionAgent { agent: string; model: string | null }
+
+function title(s: string): string { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+function launchChoices(): LaunchChoice[] {
+  const out: LaunchChoice[] = [];
+  for (const [key, agent] of Object.entries(WS.agents)) {
+    if (agent.models.length) {
+      for (const model of agent.models) out.push({ key: `${key}:${model}`, display: model, agent: key, model });
+    } else {
+      out.push({ key: `${key}:default`, display: 'default', agent: key, model: null });
+    }
+  }
+  return out;
+}
+function launchChoiceRows(choices: LaunchChoice[]): Array<{ header: string; options: string[] }> {
+  return Object.keys(WS.agents).map(agent => ({
+    header: `${title(agent)}:`,
+    options: choices.filter(c => c.agent === agent).map(c => c.display),
+  }));
+}
+
+// The last picked agent/model, remembered per workspace so the picker opens on it next time.
 // Lives at the root next to .gw-seq (not inside .worktrees/, so per-session cleanup
 // never clears it; the root is not a git repo, so it's never committed).
-function lastModelFile(): string { return path.join(REPO_ROOT, '.gw-last-model'); }
-function readLastModel(): string {
+function lastChoiceFile(): string { return path.join(REPO_ROOT, '.gw-last-agent'); }
+function readLastChoice(): string {
   try {
-    const m = fs.readFileSync(lastModelFile(), 'utf-8').trim();
-    if (MODEL_CHOICES.includes(m)) return m; // stale/unknown alias (e.g. the retired 'default') → fall through
+    return fs.readFileSync(lastChoiceFile(), 'utf-8').trim();
   } catch { /* none yet */ }
-  return 'sonnet'; // first-ever run: a middle-of-the-road starting point
+  // Upgrade the old Claude-only preference when present.
+  try {
+    const old = fs.readFileSync(path.join(REPO_ROOT, '.gw-last-model'), 'utf-8').trim();
+    if (old) return `claude:${old}`;
+  } catch { /* none yet */ }
+  return '';
 }
-function saveLastModel(m: string): void {
-  try { fs.writeFileSync(lastModelFile(), m + '\n'); } catch { /* best-effort — never blocks a start */ }
+function saveLastChoice(choice: string): void {
+  try { fs.writeFileSync(lastChoiceFile(), choice + '\n'); } catch { /* best-effort — never blocks a start */ }
+}
+function initialChoice(choices: LaunchChoice[]): number {
+  const remembered = choices.findIndex(c => c.key === readLastChoice());
+  if (remembered >= 0) return remembered;
+  const cfg = WS.agents[WS.defaultAgent];
+  const preferred = choices.findIndex(c => c.agent === WS.defaultAgent && c.model === cfg.defaultModel);
+  return preferred >= 0 ? preferred : Math.max(0, choices.findIndex(c => c.agent === WS.defaultAgent));
+}
+function sessionAgentFile(id: string): string { return path.join(sessionDir(WORKTREES_DIR, id), '.gw-agent.json'); }
+function writeSessionAgent(id: string, selected: SessionAgent): void {
+  fs.writeFileSync(sessionAgentFile(id), JSON.stringify(selected, null, 2) + '\n');
+}
+function readSessionAgent(id: string): SessionAgent {
+  try {
+    const saved = JSON.parse(fs.readFileSync(sessionAgentFile(id), 'utf-8')) as Partial<SessionAgent>;
+    if (saved.agent && WS.agents[saved.agent]) return { agent: saved.agent, model: saved.model ?? null };
+  } catch { /* legacy session: use configured default */ }
+  return { agent: WS.defaultAgent, model: null };
+}
+function withModel(agent: AgentCfg, argv: string[], model: string | null): string[] {
+  return model ? [...argv, agent.modelFlag, model] : argv;
 }
 
 async function cmdStart(flags: Flags): Promise<void> {
@@ -236,12 +280,12 @@ async function cmdStart(flags: Flags): Promise<void> {
 
   if (resumeId) {
     await assertIsolatedSession(WORKTREES_DIR, resumeId, REPO_KEYS);
-    log(`resuming ${resumeId}`);
-    seedMcpApproval(sessionDir(WORKTREES_DIR, resumeId));
-    // Continue the prior agent conversation in this worktree by default — the launcher's
-    // resumeArgs (claude `--continue`, which harmlessly starts fresh when there's nothing
-    // to continue) ride along. --no-continue launches a clean conversation instead.
-    const argv = flags.noContinue ? WS.launcher : [...WS.launcher, ...WS.resumeArgs];
+    const selected = readSessionAgent(resumeId);
+    const agent = WS.agents[selected.agent];
+    log(`resuming ${resumeId} with ${selected.agent}${selected.model ? ` (${selected.model})` : ''}`);
+    if (selected.agent === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, resumeId));
+    const base = flags.noContinue ? agent.launcher : agent.resumeLauncher;
+    const argv = withModel(agent, base, selected.model);
     emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, resumeId), '', b64(argv.join(' ')));
     return;
   }
@@ -250,19 +294,27 @@ async function cmdStart(flags: Flags): Promise<void> {
   // onto gw/<id> inside its own worktree set, so several sessions run side by side.
   const input = await readPrompt();
   if (input === null) { log('cancelled — no session started.'); emit('NONE'); return; }
-  const { text: prompt, model: picked } = input;
+  const prompt = input.text;
   if (prompt) log('naming session ...');
   // The namer's one Haiku call also infers a model when the prompt explicitly names
   // one (opus/sonnet/haiku/fable) — the fallback for piped starts, where no picker
   // ran. Absent both, the launcher runs on its own default model.
   const { slug, model: inferred } = await smartSlug(prompt, { namer: WS.namer });
-  const model = picked ?? inferred;
+  const choices = launchChoices();
+  const picked = input.choice ?? undefined;
+  const agentKey = flags.agent || picked?.agent || WS.defaultAgent;
+  const agent = WS.agents[agentKey];
+  if (!agent) die(`unknown agent "${agentKey}" (configured: ${Object.keys(WS.agents).join(', ')})`);
+  // A TTY choice carries its model explicitly. Piped/scripted starts preserve the
+  // launcher's provider default unless --model was passed (matching pre-picker behavior).
+  const model = flags.model || picked?.model || (agentKey === 'claude' ? inferred : undefined) || null;
   const id = await allocateId(slug);
   await ensureSession(WORKTREES_DIR, id, `gw/${id}`, REPO_KEYS);
   await assertIsolatedSession(WORKTREES_DIR, id, REPO_KEYS);
-  log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')}${model ? ` on ${model}` : ''}`);
-  seedMcpApproval(sessionDir(WORKTREES_DIR, id));
-  const launcher = model ? [...WS.launcher, '--model', model] : WS.launcher;
+  writeSessionAgent(id, { agent: agentKey, model: model ?? null });
+  log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')} with ${agentKey}${model ? ` on ${model}` : ''}`);
+  if (agentKey === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, id));
+  const launcher = withModel(agent, agent.launcher, model ?? null);
   emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join(' ')));
 }
 
@@ -743,7 +795,8 @@ async function cmdDoctor(): Promise<void> {
   const tools: Array<[string, boolean, string]> = [
     ['git', true, 'required for everything'],
     ['gh', false, 'only for --pr and `gw init --repo`'],
-    ['claude', false, 'the default launcher/namer (configurable in gw.config.json)'],
+    ['claude', false, 'Claude Code agent option'],
+    ['codex', false, 'Codex agent option'],
   ];
   for (const [bin, required, note] of tools) {
     const found = (await run('bash', ['-lc', `command -v ${bin}`])).code === 0;
@@ -779,6 +832,8 @@ function tsxCmd(): string {
 async function cmdSetup(): Promise<void> {
   const srcDir = path.join(GW_HOME, 'commands');
   const dstDir = path.join(os.homedir(), '.claude', 'commands');
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const codexSkills = path.join(codexHome, 'skills');
   fs.mkdirSync(dstDir, { recursive: true });
   // Bake absolute paths into the installed slash commands so /done works from ANY
   // repo's worktree (which has no gw checkout of its own — it must call gw by path).
@@ -789,9 +844,22 @@ async function cmdSetup(): Promise<void> {
     const body = fs.readFileSync(src, 'utf-8').replaceAll('__GW_ROOT__', REPO_ROOT).replaceAll('__GW_TS__', gwTs).replaceAll('__GW_TSX__', tsxCmd());
     fs.writeFileSync(path.join(dstDir, f), body);
     log(`installed /${f.replace('.md', '')} -> ~/.claude/commands/${f}`);
+
+    // Codex exposes reusable workflows as skills. Keep one source of truth for the
+    // landing instructions, adapting only the invocation name and safety flag.
+    const short = f.replace('.md', '');
+    const skillName = `gw-${short}`;
+    const skillDir = path.join(codexSkills, skillName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    const skillBody = body
+      .replace(/^---\n/, `---\nname: ${skillName}\n`)
+      .replaceAll('--in-claude', '--in-agent')
+      .replaceAll(`/${short}`, `$${skillName}`);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillBody);
+    log(`installed $${skillName} -> ${path.join(skillDir, 'SKILL.md')}`);
   }
   for (const k of REPO_KEYS) log(`${fs.existsSync(path.join(REPOS[k].dir, '.git')) ? 'ok' : '!!'}  ${k} repo at ${REPOS[k].dir}`);
-  for (const bin of ['git', 'gh', 'claude', 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
+  for (const bin of ['git', 'gh', 'claude', 'codex', 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
   log(rcFilesSourcing().length ? `shell: gw.sh already sourced (gw doctor to verify).` : `enable the gw command:  gw install   (adds '${sourceLine()}' to your shell rc)`);
 }
 
@@ -1071,13 +1139,23 @@ async function cmdInit(flags: Flags): Promise<void> {
     base: 'main',
     launcher: DEFAULT_LAUNCHER,
     namer: DEFAULT_NAMER,
+    defaultAgent: 'claude',
+    agents: {
+      claude: { models: ['fable', 'opus', 'sonnet', 'haiku'], defaultModel: 'sonnet' },
+      codex: {
+        launcher: 'codex',
+        resumeLauncher: 'codex resume --last',
+        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
+        defaultModel: 'gpt-5.6-terra',
+      },
+    },
     brandColor: DEFAULT_BRAND,
     repos,
   };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   log(`wrote ${configPath}`);
 
-  // Bind the fresh config and install slash commands.
+  // Bind the fresh config and install agent commands/skills.
   bind(loadWorkspace(root));
   await cmdSetup();
 
@@ -1094,7 +1172,7 @@ interface Flags {
   dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; quick: boolean; full: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean;
-  message: string; session: string; olderThan: string; repoFlags: string[]; rc: string;
+  message: string; session: string; olderThan: string; repoFlags: string[]; rc: string; agent: string; model: string;
   unknown: string[];
 }
 function parseFlags(argv: string[]): Flags {
@@ -1102,7 +1180,7 @@ function parseFlags(argv: string[]): Flags {
     dryRun: false, noCheck: false, noLock: false, noSync: false, quick: false, full: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false,
-    message: '', session: '', olderThan: '', repoFlags: [], rc: '', unknown: [],
+    message: '', session: '', olderThan: '', repoFlags: [], rc: '', agent: '', model: '', unknown: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -1113,7 +1191,7 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--quick') f.quick = true;
     else if (a === '--full') f.full = true;
     else if (a === '--pr') f.pr = true;
-    else if (a === '--in-claude') f.inClaude = true;
+    else if (a === '--in-claude' || a === '--in-agent') f.inClaude = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
     else if (a === '--force') f.force = true;
     else if (a === '--no-continue') f.noContinue = true;
@@ -1125,6 +1203,8 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--rc') f.rc = argv[++i] ?? '';
     else if (a === '--older-than') f.olderThan = argv[++i] ?? '';
     else if (a === '--repo') f.repoFlags.push(argv[++i] ?? '');
+    else if (a === '--agent') f.agent = argv[++i] ?? '';
+    else if (a === '--model') f.model = argv[++i] ?? '';
     else if (a === '-m' || a === '--message') f.message = argv[++i] ?? '';
     else if (a === '-h' || a === '--help') f.help = true;
     else if (!a.startsWith('-') && !f.session) f.session = a; // positional: session-id for start(resume)/done/abort
@@ -1137,8 +1217,9 @@ const HELP = `gw — Grove Workspace
 
   gw install [--rc <file>] [--print]          wire the gw command into your shell rc
   gw doctor                                   check tools + shell wiring (run this first)
-  gw init [--repo owner/name ...] [--force]   scaffold gw.config.json + slash commands
-  gw start [WT-id] [--no-continue] [--new]    branch every repo, launch the agent
+  gw init [--repo owner/name ...] [--force]   scaffold config + agent commands/skills
+  gw start [WT-id] [--no-continue] [--new]    branch every repo, choose + launch an agent
+           [--agent claude|codex] [--model id]
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree)
@@ -1154,11 +1235,11 @@ const HELP = `gw — Grove Workspace
   gw done --show                              preview per-repo diff to be landed (read-only)
   gw abort [WT-id] [--yes]                    discard a session's work (shows what's
                                               unlanded first; refuses unlanded work
-                                              in --in-claude mode without --yes)
+                                              in agent mode without --yes)
   gw status                                   cross-repo + worktree status
   gw ready                                    done-done check (safe to deploy?)
   gw prune [--older-than 2d] [--dry-run]      remove landed, idle sessions
-  gw setup                                    (re)install slash commands
+  gw setup                                    (re)install Claude commands + Codex skills
 
 Config: ${CONFIG_NAME} at the workspace root (GW_ROOT overrides discovery).`;
 

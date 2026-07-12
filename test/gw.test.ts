@@ -48,6 +48,35 @@ test('start provisions an isolated worktree per repo and allocates WT-001', asyn
   assert.equal(fs.readFileSync(path.join(fx.root, '.gw-seq'), 'utf8').trim(), '1');
 });
 
+test('start can launch Codex and resume the same agent for that worktree', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const started = await gw(fx, ['start', '--agent', 'codex'], { stdin: 'add a codex path\n' });
+  assert.equal(started.code, 0, started.stderr);
+  const id = path.basename(started.directive[1]);
+  assert.match(Buffer.from(started.directive[3], 'base64').toString('utf8'), /^codex$/);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(fx.sessionDir(id), '.gw-agent.json'), 'utf8')),
+    { agent: 'codex', model: null },
+  );
+
+  const resumed = await gw(fx, ['start', id]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), 'codex resume --last');
+
+  const clean = await gw(fx, ['start', id, '--no-continue']);
+  assert.equal(clean.code, 0, clean.stderr);
+  assert.equal(Buffer.from(clean.directive[3], 'base64').toString('utf8'), 'codex');
+});
+
+test('legacy sessions without agent metadata resume with the configured default agent', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const id = await startSession(fx);
+  fs.rmSync(path.join(fx.sessionDir(id), '.gw-agent.json'));
+  const resumed = await gw(fx, ['start', id]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.match(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), /^claude .*--continue/);
+});
+
 test('done with no changes reports nothing to merge and removes the session', async () => {
   const fx = makeFixture();
   const id = await startSession(fx);

@@ -49,11 +49,30 @@ export interface RawConfig {
                                        // conversation (default: ["--continue"], for the claude launcher). Set
                                        // [] for a launcher with no resume concept; --no-continue skips it per-run.
   namer?: string;                      // command that titles a session from its prompt (default: claude --model haiku)
+  defaultAgent?: string;               // agent preselected by gw start (default: "claude")
+  agents?: Record<string, RawAgentCfg>;// launch/resume/model presets shown in gw start
   brandColor?: string;                 // hex, for the banner + prompt box (default: Porsche orange #f26522)
   docker?: boolean;                    // write a .dockerignore into session dirs so linked deps stay out of build contexts
   sessionGate?: SessionGate | null;
   warnDirs?: WarnDir[];
   repos: Array<Partial<RepoCfg> & { key: string; dir: string }>;
+}
+
+export interface RawAgentCfg {
+  launcher?: string;                   // complete command for a fresh interactive session
+  resumeLauncher?: string;             // complete command for continuing inside the same worktree
+  models?: string[];                   // model ids/aliases shown in the picker; [] = provider default only
+  defaultModel?: string | null;         // initially selected model; null = provider default
+  modelFlag?: string;                  // flag placed before a selected model (default: --model)
+}
+
+export interface AgentCfg {
+  key: string;
+  launcher: string[];
+  resumeLauncher: string[];
+  models: string[];
+  defaultModel: string | null;
+  modelFlag: string;
 }
 
 /** Fully-resolved, defaults-applied config the rest of gw runs against. */
@@ -64,6 +83,8 @@ export interface Workspace {
   launcher: string[];
   resumeArgs: string[];
   namer: string[];
+  defaultAgent: string;
+  agents: Record<string, AgentCfg>;
   brandColor: string;
   docker: boolean;
   sessionGate: SessionGate | null;
@@ -76,6 +97,22 @@ export const DEFAULT_LAUNCHER = 'claude --permission-mode auto';
 export const DEFAULT_RESUME_ARGS = ['--continue']; // claude: continue the worktree's prior conversation
 export const DEFAULT_NAMER = 'claude --model haiku';
 export const DEFAULT_BRAND = '#f26522'; // Porsche Signal Orange
+export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
+  claude: {
+    launcher: DEFAULT_LAUNCHER,
+    resumeLauncher: `${DEFAULT_LAUNCHER} --continue`,
+    models: ['fable', 'opus', 'sonnet', 'haiku'],
+    defaultModel: 'sonnet',
+    modelFlag: '--model',
+  },
+  codex: {
+    launcher: 'codex',
+    resumeLauncher: 'codex resume --last',
+    models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
+    defaultModel: 'gpt-5.6-terra',
+    modelFlag: '--model',
+  },
+};
 
 /** hex "#f26522" → an ANSI 24-bit foreground escape. Falls back to plain orange. */
 export function hexAnsi(hex: string): string {
@@ -142,6 +179,44 @@ export function loadWorkspace(start = process.cwd()): Workspace {
   // Word-split the launcher/namer command strings (no shell quoting — these are
   // plain commands like `claude --permission-mode auto`).
   const split = (s: string): string[] => s.trim().split(/\s+/).filter(Boolean);
+  // Agent presets are deliberately separate from the git/worktree configuration.
+  // Preserve the original launcher/resumeArgs fields as Claude overrides so existing
+  // gw.config.json files gain Codex without a migration.
+  const rawAgents = raw.agents ?? {};
+  const agents: Record<string, AgentCfg> = {};
+  for (const [key, defaults] of Object.entries(DEFAULT_AGENTS)) {
+    const a = rawAgents[key] ?? {};
+    const legacyLauncher = key === 'claude' && raw.launcher ? raw.launcher : undefined;
+    const launcherText = a.launcher ?? legacyLauncher ?? defaults.launcher;
+    let resumeText = a.resumeLauncher;
+    if (!resumeText && key === 'claude' && (raw.launcher || raw.resumeArgs)) {
+      resumeText = [launcherText, ...(raw.resumeArgs ?? DEFAULT_RESUME_ARGS)].join(' ');
+    }
+    agents[key] = {
+      key,
+      launcher: split(launcherText),
+      resumeLauncher: split(resumeText ?? defaults.resumeLauncher),
+      models: a.models ?? defaults.models,
+      defaultModel: a.defaultModel === undefined ? defaults.defaultModel : a.defaultModel,
+      modelFlag: a.modelFlag ?? defaults.modelFlag,
+    };
+  }
+  // Allow additional user-defined agent presets too.
+  for (const [key, a] of Object.entries(rawAgents)) {
+    if (agents[key]) continue;
+    if (!a.launcher) throw new Error(`${configPath}: agents.${key}.launcher is required.`);
+    agents[key] = {
+      key,
+      launcher: split(a.launcher),
+      resumeLauncher: split(a.resumeLauncher ?? a.launcher),
+      models: a.models ?? [],
+      defaultModel: a.defaultModel ?? null,
+      modelFlag: a.modelFlag ?? '--model',
+    };
+  }
+  const defaultAgent = raw.defaultAgent ?? 'claude';
+  if (!agents[defaultAgent]) throw new Error(`${configPath}: defaultAgent "${defaultAgent}" is not configured.`);
+
   return {
     root,
     configPath,
@@ -149,6 +224,8 @@ export function loadWorkspace(start = process.cwd()): Workspace {
     launcher: split(raw.launcher || DEFAULT_LAUNCHER),
     resumeArgs: raw.resumeArgs ?? DEFAULT_RESUME_ARGS,
     namer: split(raw.namer || DEFAULT_NAMER),
+    defaultAgent,
+    agents,
     brandColor: raw.brandColor || DEFAULT_BRAND,
     docker: raw.docker ?? false,
     sessionGate: raw.sessionGate ?? null,
