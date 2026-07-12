@@ -18,7 +18,9 @@
  *   gw start [prompt]   put EVERY repo on a fresh `gw/<name>` branch off origin/<base>,
  *                       then the shell cd's into <root>/.worktrees/<id> and launches
  *                       the configured agent — so every repo sits side-by-side and you
- *                       edit any of them in one session. Resuming (an explicit session-id, or
+ *                       edit any of them in one session. On a TTY, a one-line picker
+ *                       chooses the model (opens on the last one used, remembered in
+ *                       .gw-last-model at the root). Resuming (an explicit session-id, or
  *                       a bare `gw start` from inside a session worktree) re-enters that
  *                       session and CONTINUES the prior agent conversation by default
  *                       (--no-continue for a clean one; --new forces a brand-new session).
@@ -60,6 +62,7 @@ import {
   landTmpRoot, landTmpDir, sweepLandTmp, activityLabel,
 } from './lib/worktrees.js';
 import { promptBox } from './lib/prompt-box.js';
+import { pickBox } from './lib/pick-box.js';
 import {
   loadWorkspace, hexAnsi, CONFIG_NAME,
   DEFAULT_LAUNCHER, DEFAULT_NAMER, DEFAULT_BRAND,
@@ -182,6 +185,25 @@ async function confirm(q: string): Promise<boolean> {
 
 // ── start ────────────────────────────────────────────────────────────────────
 
+// Model choices for the start-time picker, ordered most→least capable (fable is the
+// Mythos-class tier above opus). They mirror NAMER_MODELS in worktrees.ts — kept to
+// `claude --model` aliases so a choice is always a safe, complete argv token.
+const MODEL_CHOICES = ['fable', 'opus', 'sonnet', 'haiku'];
+// The last picked model, remembered per workspace so the picker opens on it next time.
+// Lives at the root next to .gw-seq (not inside .worktrees/, so per-session cleanup
+// never clears it; the root is not a git repo, so it's never committed).
+function lastModelFile(): string { return path.join(REPO_ROOT, '.gw-last-model'); }
+function readLastModel(): string {
+  try {
+    const m = fs.readFileSync(lastModelFile(), 'utf-8').trim();
+    if (MODEL_CHOICES.includes(m)) return m; // stale/unknown alias (e.g. the retired 'default') → fall through
+  } catch { /* none yet */ }
+  return 'sonnet'; // first-ever run: a middle-of-the-road starting point
+}
+function saveLastModel(m: string): void {
+  try { fs.writeFileSync(lastModelFile(), m + '\n'); } catch { /* best-effort — never blocks a start */ }
+}
+
 async function cmdStart(flags: Flags): Promise<void> {
   // --echo-prompt: self-test the prompt base64 round-trip, touch nothing else.
   if (flags.echoPrompt) {
@@ -218,11 +240,21 @@ async function cmdStart(flags: Flags): Promise<void> {
   // onto gw/<id> inside its own worktree set, so several sessions run side by side.
   const prompt = await readPrompt();
   if (prompt === null) { log('cancelled — no session started.'); emit('NONE'); return; }
+  // Model: on a TTY, a one-line picker (←/→ · Enter) that opens on the last-used
+  // choice. Piped/non-TTY starts (tests, `gw start < file`) skip it and behave as
+  // before.
+  let picked: string | null = null;
+  if (process.stdin.isTTY) {
+    picked = await pickBox({ header: 'Model:', options: MODEL_CHOICES, initial: MODEL_CHOICES.indexOf(readLastModel()), color: ORANGE });
+    if (picked === null) { log('cancelled — no session started.'); emit('NONE'); return; }
+    saveLastModel(picked);
+  }
   if (prompt) log('naming session ...');
   // The namer's one Haiku call also infers a model when the prompt explicitly names
-  // one (opus/sonnet/haiku/fable) — thread it into the launcher as `--model <x>`.
-  // Absent → launch on the default model.
-  const { slug, model } = await smartSlug(prompt, { namer: WS.namer });
+  // one (opus/sonnet/haiku/fable) — the fallback for piped starts, where no picker
+  // ran. Absent both, the launcher runs on its own default model.
+  const { slug, model: inferred } = await smartSlug(prompt, { namer: WS.namer });
+  const model = picked ?? inferred;
   const id = await allocateId(slug);
   await ensureSession(WORKTREES_DIR, id, `gw/${id}`, REPO_KEYS);
   await assertIsolatedSession(WORKTREES_DIR, id, REPO_KEYS);
