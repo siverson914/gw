@@ -10,7 +10,7 @@
  *   gw install          wire the `gw` shell function into your rc (~/.bashrc or
  *                       ~/.zshrc), idempotently — the one first-run step a child
  *                       process can't do for you. Run once as `npm run gw install`.
- *   gw doctor           preflight: git/gh/node/tsx/Claude/Codex + whether the shell is
+ *   gw doctor           preflight: git/gh/node/tsx/Claude/Codex/Grok + whether the shell is
  *                       wired up + whether you're in a workspace. Run this first.
  *   gw init             scaffold a workspace: detect sibling repos (or clone the
  *                       ones named with --repo), write gw.config.json, install the
@@ -167,24 +167,29 @@ function seedMcpApproval(dir: string): void {
 // then Go. Returns null if the user cancels; empty text = a plain session. Piped stdin
 // has no picker — model comes back null and the namer's inference decides.
 const PROMPT_MAX = 100_000;
-async function readPrompt(): Promise<{ text: string; choice: LaunchChoice | null } | null> {
+async function readPrompt(): Promise<{ text: string; choice: LaunchChoice | null; effort: string | null } | null> {
   const stdin = process.stdin;
   // Piped / heredoc (`gw start < file`, self-tests): consume ALL of stdin.
   if (!stdin.isTTY) {
     stdin.setEncoding('utf8');
     let data = '';
     for await (const chunk of stdin) { data += chunk; if (data.length > PROMPT_MAX) break; }
-    return { text: data.slice(0, PROMPT_MAX).trim(), choice: null };
+    return { text: data.slice(0, PROMPT_MAX).trim(), choice: null, effort: null };
   }
   const choices = launchChoices();
   const res = await promptBox({
     header: 'Enter starting prompt:', maxLen: PROMPT_MAX, color: ORANGE,
-    choices: { rows: launchChoiceRows(choices), initial: initialChoice(choices) },
+    choices: {
+      rows: launchChoiceRows(choices), initial: initialChoice(choices),
+      effort: { header: 'Effort:', perRow: effortPerRow() },
+    },
   });
   if (res === null) return null;
   const choice = res.choiceIndex === null ? null : choices[res.choiceIndex];
-  if (choice) saveLastChoice(choice.key);
-  return { text: res.text, choice };
+  // 'default' is the no-override option: pass no effort flag, use the provider default.
+  const effort = res.effort && res.effort !== 'default' ? res.effort : null;
+  if (choice) saveLastChoice(choice.key, effort);
+  return { text: res.text, choice, effort };
 }
 async function confirm(q: string): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
@@ -196,7 +201,7 @@ async function confirm(q: string): Promise<boolean> {
 // ── start ────────────────────────────────────────────────────────────────────
 
 interface LaunchChoice { key: string; display: string; agent: string; model: string | null }
-interface SessionAgent { agent: string; model: string | null }
+interface SessionAgent { agent: string; model: string | null; effort: string | null }
 
 function title(s: string): string { return s ? s[0].toUpperCase() + s.slice(1) : s; }
 function launchChoices(): LaunchChoice[] {
@@ -216,27 +221,45 @@ function launchChoiceRows(choices: LaunchChoice[]): Array<{ header: string; opti
     options: choices.filter(c => c.agent === agent).map(c => c.display),
   }));
 }
-
-// The last picked agent/model, remembered per workspace so the picker opens on it next time.
-// Lives at the root next to .gw-seq (not inside .worktrees/, so per-session cleanup
-// never clears it; the root is not a git repo, so it's never committed).
-function lastChoiceFile(): string { return path.join(REPO_ROOT, '.gw-last-agent'); }
-function readLastChoice(): string {
-  try {
-    return fs.readFileSync(lastChoiceFile(), 'utf-8').trim();
-  } catch { /* none yet */ }
-  // Upgrade the old Claude-only preference when present.
-  try {
-    const old = fs.readFileSync(path.join(REPO_ROOT, '.gw-last-model'), 'utf-8').trim();
-    if (old) return `claude:${old}`;
-  } catch { /* none yet */ }
-  return '';
+// The effort axis, one entry per agent row. 'default' (pass no flag — the provider
+// picks) always leads, so every agent has an explicit no-override choice.
+function effortPerRow(): Array<{ options: string[]; initial: number }> {
+  const last = readLastChoice();
+  return Object.entries(WS.agents).map(([key, agent]) => {
+    const options = ['default', ...agent.efforts];
+    const want = (last.key.startsWith(`${key}:`) ? last.effort : null) ?? agent.defaultEffort;
+    return { options, initial: Math.max(0, options.indexOf(want ?? 'default')) };
+  });
 }
-function saveLastChoice(choice: string): void {
-  try { fs.writeFileSync(lastChoiceFile(), choice + '\n'); } catch { /* best-effort — never blocks a start */ }
+
+// The last picked agent/model/effort, remembered per workspace so the picker opens on
+// it next time. Lives at the root next to .gw-seq (not inside .worktrees/, so
+// per-session cleanup never clears it; the root is not a git repo, so it's never
+// committed). Format: "<agent>:<model>[:<effort>]" — the two-part form is the
+// pre-effort file and means "provider default effort".
+function lastChoiceFile(): string { return path.join(REPO_ROOT, '.gw-last-agent'); }
+function readLastChoice(): { key: string; effort: string | null } {
+  let line = '';
+  try {
+    line = fs.readFileSync(lastChoiceFile(), 'utf-8').trim();
+  } catch { /* none yet */ }
+  if (!line) {
+    // Upgrade the old Claude-only preference when present.
+    try {
+      const old = fs.readFileSync(path.join(REPO_ROOT, '.gw-last-model'), 'utf-8').trim();
+      if (old) line = `claude:${old}`;
+    } catch { /* none yet */ }
+  }
+  const parts = line.split(':');
+  if (parts.length < 3) return { key: line, effort: null };
+  const effort = parts[parts.length - 1];
+  return { key: parts.slice(0, -1).join(':'), effort: effort === 'default' ? null : effort };
+}
+function saveLastChoice(choice: string, effort: string | null): void {
+  try { fs.writeFileSync(lastChoiceFile(), `${choice}:${effort ?? 'default'}\n`); } catch { /* best-effort — never blocks a start */ }
 }
 function initialChoice(choices: LaunchChoice[]): number {
-  const remembered = choices.findIndex(c => c.key === readLastChoice());
+  const remembered = choices.findIndex(c => c.key === readLastChoice().key);
   if (remembered >= 0) return remembered;
   const cfg = WS.agents[WS.defaultAgent];
   const preferred = choices.findIndex(c => c.agent === WS.defaultAgent && c.model === cfg.defaultModel);
@@ -249,12 +272,26 @@ function writeSessionAgent(id: string, selected: SessionAgent): void {
 function readSessionAgent(id: string): SessionAgent {
   try {
     const saved = JSON.parse(fs.readFileSync(sessionAgentFile(id), 'utf-8')) as Partial<SessionAgent>;
-    if (saved.agent && WS.agents[saved.agent]) return { agent: saved.agent, model: saved.model ?? null };
+    if (saved.agent && WS.agents[saved.agent]) return { agent: saved.agent, model: saved.model ?? null, effort: saved.effort ?? null };
   } catch { /* legacy session: use configured default */ }
-  return { agent: WS.defaultAgent, model: null };
+  return { agent: WS.defaultAgent, model: null, effort: null };
 }
-function withModel(agent: AgentCfg, argv: string[], model: string | null): string[] {
-  return model ? [...argv, agent.modelFlag, model] : argv;
+// Append "<flag> <value>" to an argv. A multi-word flag is split; a trailing '=' on
+// its last word glues the value on (codex: `-c model_reasoning_effort=` + `high`).
+function withFlag(argv: string[], flag: string, value: string | null): string[] {
+  if (!value) return argv;
+  const words = flag.trim().split(/\s+/).filter(Boolean);
+  const last = words[words.length - 1];
+  return last.endsWith('=')
+    ? [...argv, ...words.slice(0, -1), last + value]
+    : [...argv, ...words, value];
+}
+function launchArgv(agent: AgentCfg, base: string[], selected: { model: string | null; effort: string | null }): string[] {
+  return withFlag(withFlag(base, agent.modelFlag, selected.model), agent.effortFlag, selected.effort);
+}
+/** "sonnet, high effort" / "high effort" / "sonnet" / "" — for start/resume logs. */
+function describeSelection(s: { model: string | null; effort: string | null }): string {
+  return [s.model, s.effort && `${s.effort} effort`].filter(Boolean).join(', ');
 }
 
 async function cmdStart(flags: Flags): Promise<void> {
@@ -282,10 +319,11 @@ async function cmdStart(flags: Flags): Promise<void> {
     await assertIsolatedSession(WORKTREES_DIR, resumeId, REPO_KEYS);
     const selected = readSessionAgent(resumeId);
     const agent = WS.agents[selected.agent];
-    log(`resuming ${resumeId} with ${selected.agent}${selected.model ? ` (${selected.model})` : ''}`);
+    const desc = describeSelection(selected);
+    log(`resuming ${resumeId} with ${selected.agent}${desc ? ` (${desc})` : ''}`);
     if (selected.agent === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, resumeId));
     const base = flags.noContinue ? agent.launcher : agent.resumeLauncher;
-    const argv = withModel(agent, base, selected.model);
+    const argv = launchArgv(agent, base, selected);
     emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, resumeId), '', b64(argv.join(' ')));
     return;
   }
@@ -305,16 +343,19 @@ async function cmdStart(flags: Flags): Promise<void> {
   const agentKey = flags.agent || picked?.agent || WS.defaultAgent;
   const agent = WS.agents[agentKey];
   if (!agent) die(`unknown agent "${agentKey}" (configured: ${Object.keys(WS.agents).join(', ')})`);
-  // A TTY choice carries its model explicitly. Piped/scripted starts preserve the
-  // launcher's provider default unless --model was passed (matching pre-picker behavior).
+  // A TTY choice carries its model + effort explicitly. Piped/scripted starts preserve
+  // the provider defaults unless --model/--effort were passed (matching pre-picker behavior).
   const model = flags.model || picked?.model || (agentKey === 'claude' ? inferred : undefined) || null;
+  const effort = flags.effort || (input.choice ? input.effort : null) || null;
   const id = await allocateId(slug);
   await ensureSession(WORKTREES_DIR, id, `gw/${id}`, REPO_KEYS);
   await assertIsolatedSession(WORKTREES_DIR, id, REPO_KEYS);
-  writeSessionAgent(id, { agent: agentKey, model: model ?? null });
-  log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')} with ${agentKey}${model ? ` on ${model}` : ''}`);
+  const selected: SessionAgent = { agent: agentKey, model: model ?? null, effort };
+  writeSessionAgent(id, selected);
+  const desc = describeSelection(selected);
+  log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')} with ${agentKey}${desc ? ` on ${desc}` : ''}`);
   if (agentKey === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, id));
-  const launcher = withModel(agent, agent.launcher, model ?? null);
+  const launcher = launchArgv(agent, agent.launcher, selected);
   emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join(' ')));
 }
 
@@ -797,6 +838,7 @@ async function cmdDoctor(): Promise<void> {
     ['gh', false, 'only for --pr and `gw init --repo`'],
     ['claude', false, 'Claude Code agent option'],
     ['codex', false, 'Codex agent option'],
+    ['grok', false, 'Grok agent option'],
   ];
   for (const [bin, required, note] of tools) {
     const found = (await run('bash', ['-lc', `command -v ${bin}`])).code === 0;
@@ -1172,7 +1214,7 @@ interface Flags {
   dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; quick: boolean; full: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean;
-  message: string; session: string; olderThan: string; repoFlags: string[]; rc: string; agent: string; model: string;
+  message: string; session: string; olderThan: string; repoFlags: string[]; rc: string; agent: string; model: string; effort: string;
   unknown: string[];
 }
 function parseFlags(argv: string[]): Flags {
@@ -1180,7 +1222,7 @@ function parseFlags(argv: string[]): Flags {
     dryRun: false, noCheck: false, noLock: false, noSync: false, quick: false, full: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false,
-    message: '', session: '', olderThan: '', repoFlags: [], rc: '', agent: '', model: '', unknown: [],
+    message: '', session: '', olderThan: '', repoFlags: [], rc: '', agent: '', model: '', effort: '', unknown: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -1205,6 +1247,7 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--repo') f.repoFlags.push(argv[++i] ?? '');
     else if (a === '--agent') f.agent = argv[++i] ?? '';
     else if (a === '--model') f.model = argv[++i] ?? '';
+    else if (a === '--effort') f.effort = argv[++i] ?? '';
     else if (a === '-m' || a === '--message') f.message = argv[++i] ?? '';
     else if (a === '-h' || a === '--help') f.help = true;
     else if (!a.startsWith('-') && !f.session) f.session = a; // positional: session-id for start(resume)/done/abort
@@ -1219,7 +1262,8 @@ const HELP = `gw — Grove Workspace
   gw doctor                                   check tools + shell wiring (run this first)
   gw init [--repo owner/name ...] [--force]   scaffold config + agent commands/skills
   gw start [WT-id] [--no-continue] [--new]    branch every repo, choose + launch an agent
-           [--agent claude|codex] [--model id]
+           [--agent claude|codex|grok]
+           [--model id] [--effort level]
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree)

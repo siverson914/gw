@@ -2,14 +2,14 @@
 
 **Give each task its own set of git worktrees — one per repo, branched together — so a coding agent can make one coherent change across several repos and land it everywhere with a single, can't-lose-work command.**
 
-![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a) ![license](https://img.shields.io/badge/license-MIT-blue) ![status](https://img.shields.io/badge/agents-Claude%20%2B%20Codex-f26522)
+![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a) ![license](https://img.shields.io/badge/license-MIT-blue) ![status](https://img.shields.io/badge/agents-Claude%20%2B%20Codex%20%2B%20Grok-f26522)
 
 Coding agents are excellent inside one repo. Real changes span three — API + web + worker. The moment a task crosses repos you're back to juggling branches, keeping three checkouts in lockstep, and hoping you didn't land two of the three. `gw` removes that: every unit of work gets a parallel mirror of your workspace, with **every repo on a fresh branch off `origin/<base>`**. The agent edits across all of them in one session; `gw done` gates, squash-merges, and pushes only the repos that actually changed — atomically per repo, idempotent, and built so a failure can't strand your work.
 
 ```
 gw install  →   wire the gw command into your shell (one time, idempotent)
 gw init     →   detect repos, write config, install Claude commands + Codex skills
-gw start    →   type a task; pick Claude or Codex; launch it in generic git worktrees
+gw start    →   type a task; pick Claude, Codex, or Grok; launch it in generic git worktrees
 /done       →   Claude: gate + squash-merge + push — only changed repos
 $gw-done    →   Codex: the same shared landing workflow
 gw ready    →   "is anything unlanded? safe to deploy?" — one verdict
@@ -100,9 +100,9 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | Command | What it does |
 |---|---|
 | `gw install [--rc <file>] [--print]` | Append `source <clone>/gw.sh` to your shell rc so the `gw` command exists in every shell. Idempotent; uses this clone's absolute path. Run once as `npm run gw install`. |
-| `gw doctor` | Preflight: required tools, optional `claude` and `codex` launchers, shell wiring, and workspace discovery. |
+| `gw doctor` | Preflight: required tools, optional `claude`, `codex`, and `grok` launchers, shell wiring, and workspace discovery. |
 | `gw init [--repo owner/name …] [--force]` | Detect sibling repos, write `gw.config.json`, and install Claude slash commands plus Codex skills. |
-| `gw start [WT-id] [--no-continue] [--new]` | Branch every repo, open the prompt box with a **Run with** row containing Claude models and Codex, and launch the selection. The choice is saved with the session, so resume uses the same agent. `--agent`/`--model` are available for scripts. |
+| `gw start [WT-id] [--no-continue] [--new]` | Branch every repo, open the prompt box with **Run with** rows (agent + model) and an **Effort** row (reasoning effort for the selected agent; `default` = provider default), and launch the selection. The choice is saved with the session, so resume uses the same agent, model, and effort. `--agent`/`--model`/`--effort` are available for scripts. |
 | `gw done [--pr] [--no-check] [--quick\|--full] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. `--quick` runs each repo's lighter, diff-scoped `gateQuick` (falling back to the full `gate`, so never *less* safe); `--full` forces the full gate even where a repo sets `gateQuickDefault`. Without `-m`, the message is composed from the branch's own commits (the `/done` skill writes a richer one). |
 | `gw done --show` | Read-only: print the net per-repo diff that would land (the session's own work, vs the merge base with `origin/<base>` — never other people's newer commits, inverted), staging/gating/merging nothing. Used by `/done` to compose the commit message before landing. |
 | `gw status` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. |

@@ -56,7 +56,7 @@ test('start can launch Codex and resume the same agent for that worktree', async
   assert.match(Buffer.from(started.directive[3], 'base64').toString('utf8'), /^codex$/);
   assert.deepEqual(
     JSON.parse(fs.readFileSync(path.join(fx.sessionDir(id), '.gw-agent.json'), 'utf8')),
-    { agent: 'codex', model: null },
+    { agent: 'codex', model: null, effort: null },
   );
 
   const resumed = await gw(fx, ['start', id]);
@@ -66,6 +66,46 @@ test('start can launch Codex and resume the same agent for that worktree', async
   const clean = await gw(fx, ['start', id, '--no-continue']);
   assert.equal(clean.code, 0, clean.stderr);
   assert.equal(Buffer.from(clean.directive[3], 'base64').toString('utf8'), 'codex');
+});
+
+test('start can launch Grok with model + effort axes and resume the same selection', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const started = await gw(fx, ['start', '--agent', 'grok', '--model', 'grok-4.5', '--effort', 'medium'], { stdin: 'add a grok path\n' });
+  assert.equal(started.code, 0, started.stderr);
+  const id = path.basename(started.directive[1]);
+  assert.equal(
+    Buffer.from(started.directive[3], 'base64').toString('utf8'),
+    'grok --permission-mode auto --model grok-4.5 --reasoning-effort medium',
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(fx.sessionDir(id), '.gw-agent.json'), 'utf8')),
+    { agent: 'grok', model: 'grok-4.5', effort: 'medium' },
+  );
+
+  const resumed = await gw(fx, ['start', id]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(
+    Buffer.from(resumed.directive[3], 'base64').toString('utf8'),
+    'grok --permission-mode auto --continue --model grok-4.5 --reasoning-effort medium',
+  );
+});
+
+test('--effort with a config-key effort flag (codex) glues the value onto the override', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const started = await gw(fx, ['start', '--agent', 'codex', '--effort', 'xhigh'], { stdin: 'tune effort\n' });
+  assert.equal(started.code, 0, started.stderr);
+  const id = path.basename(started.directive[1]);
+  assert.equal(
+    Buffer.from(started.directive[3], 'base64').toString('utf8'),
+    'codex -c model_reasoning_effort=xhigh',
+  );
+
+  const resumed = await gw(fx, ['start', id]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(
+    Buffer.from(resumed.directive[3], 'base64').toString('utf8'),
+    'codex resume --last -c model_reasoning_effort=xhigh',
+  );
 });
 
 test('legacy sessions without agent metadata resume with the configured default agent', async () => {

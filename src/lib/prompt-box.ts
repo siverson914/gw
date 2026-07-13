@@ -11,13 +11,19 @@
  *   ╰──────────────────────────────────────────╯
  *    Claude:  fable       opus          ▐sonnet▌       haiku
  *    Codex:   gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna  gpt-5.5  gpt-5.4  gpt-5.4-mini
+ *    Grok:    grok-4.5
+ *    Effort:  ▐default▌   low           medium        high
  *    [ Go ]  [ Cancel ]
  *    Tab: move · Enter: newline · Ctrl+D: Go · Ctrl+C: cancel
  *
- * Tab / Shift+Tab cycle focus edit → model → Go → Cancel; on the model row ←/→
- * (or a letter, or 1-9) pick and Enter advances to [Go]. So the flow reads top to
- * bottom: write the prompt, choose the model, Go. Typing while a button is focused
- * jumps back into the editor.
+ * Tab / Shift+Tab cycle focus edit → model → effort → Go → Cancel; on a choice row
+ * ←/→ (or a letter, or 1-9) pick and Enter advances. So the flow reads top to
+ * bottom: write the prompt, choose the model, choose the effort, Go. Typing while a
+ * button is focused jumps back into the editor.
+ *
+ * The effort row is a second, independent axis: its options belong to the agent row
+ * the model selection sits on, and swap when the model selection moves to another
+ * agent (each agent's effort pick is remembered while the box is open).
  *
  * Editing: soft word wrap at spaces (a word only splits when it can't fit a row),
  * arrows / Home / End / PgUp / PgDn move, Ctrl/Alt+←/→ (and Alt+B/F) move by word,
@@ -55,7 +61,7 @@ const BASE_H = ROWS + 5;    // header + top border + ROWS + bottom border + butt
 const PASTE_END = `${ESC}[201~`;
 const UNDO_MAX = 200;
 
-type Focus = 'edit' | 'model' | 'go' | 'cancel';
+type Focus = 'edit' | 'model' | 'effort' | 'go' | 'cancel';
 interface DRow { line: number; start: number; text: string; last: boolean } // last = final row of its logical line
 interface Snap { lines: string[]; cl: number; cc: number }
 
@@ -64,6 +70,9 @@ export interface PromptBoxChoices {
   options?: string[]; // legacy single-row choices
   rows?: Array<{ header: string; options: string[] }>;
   initial?: number;  // index selected on open (default 0)
+  /** Optional second axis, one entry per rows[] entry: the effort row shows the
+   *  options of whichever row the main selection sits on. */
+  effort?: { header: string; perRow: Array<{ options: string[]; initial: number }> };
 }
 export interface PromptBoxOptions {
   header?: string;
@@ -77,6 +86,10 @@ export interface PromptBoxResult {
   choice: string | null;
   /** Flat index across all choice rows. */
   choiceIndex: number | null;
+  /** The picked effort option for the selected row, or null without an effort axis. */
+  effort: string | null;
+  /** Index within the selected row's effort options. */
+  effortIndex: number | null;
 }
 
 /** Run the editor. Resolves with the (trimmed) text + choice on Go, or null on Cancel. */
@@ -85,11 +98,17 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   const maxLen = opts.maxLen ?? 100_000;
   const ORANGE = opts.color ?? DEFAULT_ORANGE;
   const choices = opts.choices ?? null;
-  const choiceRows = choices?.rows?.length
-    ? choices.rows.filter(r => r.options.length)
+  const rawRows = choices?.rows?.length
+    ? choices.rows
     : choices?.options?.length ? [{ header: choices.header ?? '', options: choices.options }] : [];
+  const keep = rawRows.map(r => r.options.length > 0);
+  const choiceRows = rawRows.filter((_, i) => keep[i]);
   const flatChoices = choiceRows.flatMap(r => r.options);
-  const BLOCK_H = BASE_H + choiceRows.length;
+  // The effort axis rides along only when it aligns 1:1 with the rows it annotates.
+  const effortCfg = choices?.effort && choices.effort.perRow.length === rawRows.length
+    ? { header: choices.effort.header, perRow: choices.effort.perRow.filter((_, i) => keep[i]) }
+    : null;
+  const BLOCK_H = BASE_H + choiceRows.length + (effortCfg ? 1 : 0);
   const stdin = process.stdin;
   const err = process.stderr;
   const w = (s: string): boolean => err.write(s);
@@ -106,6 +125,9 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   let drawn = false;
   let done = false;
   let sel = flatChoices.length ? Math.max(0, Math.min(flatChoices.length - 1, choices?.initial ?? 0)) : 0;
+  // Per-row effort selection — each agent row remembers its own pick while the box is open.
+  const esel = (effortCfg?.perRow ?? []).map(p =>
+    p.options.length ? Math.max(0, Math.min(p.options.length - 1, p.initial)) : 0);
   const undo: Snap[] = [], redo: Snap[] = [];
   let lastKind = '';         // edit kind of the previous mutation, for undo coalescing
 
@@ -279,7 +301,7 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     const info = n ? ` ${lay.length > ROWS ? `row ${cr + 1}/${lay.length} · ` : ''}${n.toLocaleString('en-US')} chars${truncated ? ` · TRUNCATED at ${maxLen.toLocaleString('en-US')}` : ''} ` : '';
     out.push(`${ORANGE}╰${'─'.repeat(Math.max(0, W - info.length))}${RESET}${DIM}${info}${RESET}${ORANGE}──╯${RESET}`);
     if (choiceRows.length) {
-      const headerW = Math.max(...choiceRows.map(r => r.header.length));
+      const headerW = Math.max(...choiceRows.map(r => r.header.length), effortCfg?.header.length ?? 0);
       const colW = Array.from({ length: Math.max(...choiceRows.map(r => r.options.length)) }, (_, col) =>
         Math.max(...choiceRows.map(r => r.options[col]?.length ?? 0)));
       let offset = 0;
@@ -293,6 +315,21 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         });
         out.push(`  ${focus === 'model' ? BOLD : DIM}${row.header.padEnd(headerW)}${RESET} ${opts.join(' ')}${focus === 'model' && offset <= sel && sel < offset + row.options.length ? `  ${DIM}←/→ · ↑/↓ · Enter${RESET}` : ''}`);
         offset += row.options.length;
+      }
+      if (effortCfg) {
+        // Options belong to the agent row the main selection sits on; column widths
+        // span every row's variants so switching agents never shifts the layout.
+        const [crow] = selectedRC();
+        const eopts = effortCfg.perRow[crow]?.options ?? [];
+        const ecolW = Array.from({ length: Math.max(0, ...effortCfg.perRow.map(p => p.options.length)) }, (_, col) =>
+          Math.max(0, ...effortCfg.perRow.map(p => p.options[col]?.length ?? 0)));
+        const opts = eopts.map((o, col) => {
+          const padded = o.padEnd(ecolW[col]);
+          return col !== esel[crow] ? `${DIM} ${padded} ${RESET}`
+            : focus === 'effort' ? `${ORANGE}${INV}${BOLD} ${padded} ${RESET}`
+              : `${ORANGE}${BOLD} ${padded} ${RESET}`;
+        });
+        out.push(`  ${focus === 'effort' ? BOLD : DIM}${effortCfg.header.padEnd(headerW)}${RESET} ${opts.join(' ')}${focus === 'effort' ? `  ${DIM}←/→ · Enter${RESET}` : ''}`);
       }
     }
     const btn = (label: string, focused: boolean): string =>
@@ -322,7 +359,9 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     return null;
   }
 
-  const cycle: Focus[] = flatChoices.length ? ['edit', 'model', 'go', 'cancel'] : ['edit', 'go', 'cancel'];
+  const cycle: Focus[] = flatChoices.length
+    ? (effortCfg ? ['edit', 'model', 'effort', 'go', 'cancel'] : ['edit', 'model', 'go', 'cancel'])
+    : ['edit', 'go', 'cancel'];
   const step = (d: number): void => { focus = cycle[(cycle.indexOf(focus) + d + cycle.length) % cycle.length]; };
   const selectedRC = (): [number, number] => {
     let offset = 0;
@@ -344,6 +383,12 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     const next = (row + d + choiceRows.length) % choiceRows.length;
     sel = rowOffset(next) + Math.min(col, choiceRows[next].options.length - 1);
   };
+  const pickEffort = (d: number): void => {
+    if (!effortCfg) return;
+    const [row] = selectedRC();
+    const n = effortCfg.perRow[row]?.options.length ?? 0;
+    if (n) esel[row] = (esel[row] + d + n) % n;
+  };
 
   return new Promise<PromptBoxResult | null>((resolve) => {
     // Restore the terminal on EVERY exit path — including a crash — so a bug here
@@ -362,11 +407,17 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
       stdin.pause();
       resolve(result);
     };
-    const submit = (): void => finish({
-      text: text().slice(0, maxLen).trim(),
-      choice: flatChoices.length ? flatChoices[sel] : null,
-      choiceIndex: flatChoices.length ? sel : null,
-    });
+    const submit = (): void => {
+      const [row] = selectedRC();
+      const eopts = effortCfg?.perRow[row]?.options ?? [];
+      finish({
+        text: text().slice(0, maxLen).trim(),
+        choice: flatChoices.length ? flatChoices[sel] : null,
+        choiceIndex: flatChoices.length ? sel : null,
+        effort: eopts.length ? eopts[esel[row]] : null,
+        effortIndex: eopts.length ? esel[row] : null,
+      });
+    };
 
     function key(k: string): void {
       // Alt-chords: word motion / word kill, the readline bindings.
@@ -398,10 +449,12 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         case 'B': if (focus === 'edit') moveVert(1); else if (focus === 'model') pickRow(1); else step(1); return;   // ↓
         case 'C': if (focus === 'edit') { if (jump) wordRight(); else moveRight(); }             // →
           else if (focus === 'model') pick(1);
+          else if (focus === 'effort') pickEffort(1);
           else focus = 'cancel';
           return;
         case 'D': if (focus === 'edit') { if (jump) wordLeft(); else moveLeft(); }               // ←
           else if (focus === 'model') pick(-1);
+          else if (focus === 'effort') pickEffort(-1);
           else focus = 'go';
           return;
         case 'H': if (focus === 'edit') { if (jump) docHome(); else rowHome(); } return;
@@ -419,7 +472,8 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
       if (code === 13 || code === 10) {                                 // Enter
         if (focus === 'go') return submit();
         if (focus === 'cancel') return finish(null);
-        if (focus === 'model') { focus = 'go'; return; }                // picked — step to [Go]
+        if (focus === 'model') { focus = effortCfg ? 'effort' : 'go'; return; } // picked — step onward
+        if (focus === 'effort') { focus = 'go'; return; }               // picked — step to [Go]
         // Lone "." just typed = finish (compat with the pre-box reader).
         if (lines[cl] === '.' && cc === 1) { lines.splice(cl, 1); if (!lines.length) lines = ['']; cl = Math.max(0, cl - 1); cc = lines[cl].length; return submit(); }
         mark('nl'); insertText('\n'); return;
@@ -432,6 +486,20 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
           for (let d = 1; d <= opts.length; d++) {
             const i = (sel + d) % opts.length;
             if (opts[i].toLowerCase().startsWith(c)) { sel = i; return; }
+          }
+        }
+        return;
+      }
+      if (focus === 'effort') {                                         // same shortcuts, scoped to the row
+        const [row] = selectedRC();
+        const opts = effortCfg?.perRow[row]?.options ?? [];
+        if (!opts.length) return;
+        if (ch >= '1' && ch <= '9') { const i = code - 49; if (i < opts.length) esel[row] = i; return; }
+        const c = ch.toLowerCase();
+        if (c >= 'a' && c <= 'z') {
+          for (let d = 1; d <= opts.length; d++) {
+            const i = (esel[row] + d) % opts.length;
+            if (opts[i].toLowerCase().startsWith(c)) { esel[row] = i; return; }
           }
         }
         return;
