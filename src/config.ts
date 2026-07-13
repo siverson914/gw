@@ -64,6 +64,11 @@ export interface RawAgentCfg {
   models?: string[];                   // model ids/aliases shown in the picker; [] = provider default only
   defaultModel?: string | null;         // initially selected model; null = provider default
   modelFlag?: string;                  // flag placed before a selected model (default: --model)
+  efforts?: string[];                  // reasoning-effort levels shown in the picker; [] = no effort axis
+  defaultEffort?: string | null;       // initially selected effort; null = provider default
+  effortFlag?: string;                 // flag placed before a selected effort (default: --effort).
+                                       // A trailing '=' on the last word glues the value on, for
+                                       // config-style flags: "-c model_reasoning_effort=" + "high"
 }
 
 export interface AgentCfg {
@@ -73,6 +78,9 @@ export interface AgentCfg {
   models: string[];
   defaultModel: string | null;
   modelFlag: string;
+  efforts: string[];
+  defaultEffort: string | null;
+  effortFlag: string;
 }
 
 /** Fully-resolved, defaults-applied config the rest of gw runs against. */
@@ -104,6 +112,9 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     models: ['fable', 'opus', 'sonnet', 'haiku'],
     defaultModel: 'sonnet',
     modelFlag: '--model',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], // `claude --help`: --effort choices
+    defaultEffort: null,
+    effortFlag: '--effort',
   },
   codex: {
     launcher: 'codex',
@@ -111,6 +122,21 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
     defaultModel: 'gpt-5.6-terra',
     modelFlag: '--model',
+    // Union across the served models (~/.codex/models_cache.json); max/ultra exist
+    // only on the gpt-5.6 flagships — older models cap at xhigh.
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    defaultEffort: null, // Codex falls back to config.toml's model_reasoning_effort
+    effortFlag: '-c model_reasoning_effort=', // no dedicated flag; set via config override
+  },
+  grok: {
+    launcher: 'grok --permission-mode auto',
+    resumeLauncher: 'grok --permission-mode auto --continue',
+    models: ['grok-4.5'], // `grok models` — the CLI proxy serves this list per login
+    defaultModel: 'grok-4.5',
+    modelFlag: '--model',
+    efforts: ['low', 'medium', 'high'], // ~/.grok/models_cache.json reasoning_efforts
+    defaultEffort: null, // the CLI's own default for grok-4.5 is high
+    effortFlag: '--reasoning-effort',
   },
   agy: {
     launcher: 'agy --dangerously-skip-permissions',
@@ -126,6 +152,9 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     ],
     defaultModel: 'Gemini 3.1 Pro (High)',
     modelFlag: '--model',
+    efforts: [], // agy exposes no reasoning-effort flag, so the picker shows no effort row
+    defaultEffort: null,
+    effortFlag: '--effort',
   },
 };
 
@@ -214,6 +243,9 @@ export function loadWorkspace(start = process.cwd()): Workspace {
       models: a.models ?? defaults.models,
       defaultModel: a.defaultModel === undefined ? defaults.defaultModel : a.defaultModel,
       modelFlag: a.modelFlag ?? defaults.modelFlag,
+      efforts: a.efforts ?? defaults.efforts,
+      defaultEffort: a.defaultEffort === undefined ? defaults.defaultEffort : a.defaultEffort,
+      effortFlag: a.effortFlag ?? defaults.effortFlag,
     };
   }
   // Allow additional user-defined agent presets too.
@@ -227,6 +259,9 @@ export function loadWorkspace(start = process.cwd()): Workspace {
       models: a.models ?? [],
       defaultModel: a.defaultModel ?? null,
       modelFlag: a.modelFlag ?? '--model',
+      efforts: a.efforts ?? [],
+      defaultEffort: a.defaultEffort ?? null,
+      effortFlag: a.effortFlag ?? '--effort',
     };
   }
   const defaultAgent = raw.defaultAgent ?? 'claude';
