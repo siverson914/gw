@@ -24,8 +24,15 @@ gw() {
   # zsh, scoped to this function (local_options restores it on return).
   [ -n "${ZSH_VERSION:-}" ] && setopt local_options sh_word_split
 
-  # GW_HOME: dir of this script (resolve symlinks for the common `source ~/link` case).
-  if [ -n "${BASH_SOURCE[0]:-}" ]; then home="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # GW_HOME: prefer an already-exported value — self-location via BASH_SOURCE/%x
+  # assumes we're being sourced fresh from the real file on disk, which breaks
+  # when a caller recreates this function from a dumped shell-snapshot file
+  # instead (e.g. Claude Code's Bash tool re-sourcing a cached function dump in
+  # every fresh shell): zsh then reports the snapshot file as %x, not gw.sh.
+  # Exported vars survive that recreation intact, so an rc file that sets
+  # GW_HOME explicitly sidesteps the problem entirely.
+  if [ -n "$GW_HOME" ]; then home="$GW_HOME"
+  elif [ -n "${BASH_SOURCE[0]:-}" ]; then home="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   elif [ -n "${(%):-%x}" ]; then home="$(cd "$(dirname "${(%):-%x}")" && pwd)"   # zsh
   else home="$(cd "$(dirname "$0")" && pwd)"; fi
 
