@@ -734,13 +734,23 @@ async function cmdAbort(flags: Flags): Promise<void> {
 function sourceLine(): string { return `source ${path.join(GW_HOME, 'gw.sh')}`; }
 
 // rc files (that exist) already sourcing THIS gw.sh — so install is idempotent and
-// doctor can report whether the shell is wired up.
+// doctor can report whether the shell is wired up. Accepts either the literal
+// absolute path (what `gw install` writes) or a `source "$GW_HOME/gw.sh"` line
+// paired with an `export GW_HOME=` set to this checkout — the setup gw.sh itself
+// now prefers, since GW_HOME survives a shell-snapshot re-source that breaks
+// self-location (see the GW_HOME guard in gw.sh).
 function rcFilesSourcing(): string[] {
   const marker = path.join(GW_HOME, 'gw.sh');
+  const escaped = GW_HOME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const varSource = /source\s+"?\$\{?GW_HOME\}?\/gw\.sh"?/;
+  const varExport = new RegExp(`export\\s+GW_HOME=["']?${escaped}["']?`);
   const out: string[] = [];
   for (const name of ['.bashrc', '.zshrc', '.bash_profile', '.profile']) {
     const p = path.join(os.homedir(), name);
-    try { if (fs.readFileSync(p, 'utf-8').includes(marker)) out.push(p); } catch { /* absent */ }
+    try {
+      const content = fs.readFileSync(p, 'utf-8');
+      if (content.includes(marker) || (varSource.test(content) && varExport.test(content))) out.push(p);
+    } catch { /* absent */ }
   }
   return out;
 }
