@@ -17,12 +17,7 @@
 #            up from $PWD; set GW_ROOT yourself to override.
 
 gw() {
-  local home out kind dir b64 b64l rc tsx root prompt launcher d line
-
-  # The launcher default (`claude --permission-mode auto`) is word-split below by leaving
-  # ${launcher:-...} unquoted — bash does this automatically, zsh does not. Enable it for
-  # zsh, scoped to this function (local_options restores it on return).
-  [ -n "${ZSH_VERSION:-}" ] && setopt local_options sh_word_split
+  local home out kind dir b64 b64l rc tsx root prompt launcher word d line
 
   # GW_HOME: prefer an already-exported value — self-location via BASH_SOURCE/%x
   # assumes we're being sourced fresh from the real file on disk, which breaks
@@ -92,10 +87,22 @@ gw() {
       # honor the OSC 0 escape, so parallel sessions are tellable apart at a glance.
       # TTY-only: writing the escape into a pipe/log would just be garbage bytes.
       if [ -t 1 ]; then printf '\033]0;%s\007' "$(basename "$dir")"; fi
-      # Decode the launcher argv (e.g. "claude --permission-mode auto") and word-split
-      # it. The prompt rides as ONE argv word (never eval'd) so quotes/$/!/backticks in
-      # it survive untouched.
+      # Decode the launcher argv: gw.ts newline-joins it (e.g. "claude\n--permission-mode\nauto")
+      # rather than space-joining, because some agents' model names contain spaces/parens
+      # (agy's "Gemini 3.1 Pro (High)") that IFS word-splitting would shatter. Rebuild it
+      # as real positional params via a line-at-a-time read — this is safe to clobber $@
+      # with (tsx already consumed the original "$@" above) and works identically in bash
+      # and zsh, unlike arrays. The prompt still rides as ONE argv word (never eval'd) so
+      # quotes/$/!/backticks in it survive untouched.
       launcher="$(printf '%s' "$b64l" | base64 -d 2>/dev/null)"
+      if [ -z "$launcher" ]; then
+        set -- claude --permission-mode auto
+      else
+        set --
+        while IFS= read -r word; do set -- "$@" "$word"; done <<EOF
+$launcher
+EOF
+      fi
       if [ ! -t 0 ] || [ ! -t 1 ]; then
         # Non-interactive caller (an agent's shell, a script): launching an interactive
         # agent here just dies. The worktree is ready — report it and let the caller drive.
@@ -106,11 +113,9 @@ gw() {
         # `--` ends option parsing so a prompt starting with `-`/`---` (a markdown rule,
         # a diff, a flag-like first line) is taken as the positional prompt, not parsed
         # as a launcher flag. $prompt stays ONE argv word; never eval'd.
-        # shellcheck disable=SC2086
-        ${launcher:-claude --permission-mode auto} -- "$prompt"
+        "$@" -- "$prompt"
       else
-        # shellcheck disable=SC2086
-        ${launcher:-claude --permission-mode auto}
+        "$@"
       fi
       ;;
     *) : ;;  # NONE / empty: nothing to do

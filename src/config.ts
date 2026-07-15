@@ -112,6 +112,21 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     defaultModel: 'gpt-5.6-terra',
     modelFlag: '--model',
   },
+  agy: {
+    launcher: 'agy --dangerously-skip-permissions',
+    resumeLauncher: 'agy --dangerously-skip-permissions --continue',
+    // Display names straight from `agy models` — unlike claude/codex these contain
+    // spaces/parens, which is why the CD_AND_LAUNCH argv path is newline- not
+    // space-joined (see gw.ts/gw.sh).
+    models: [
+      'Gemini 3.5 Flash (Medium)', 'Gemini 3.5 Flash (High)', 'Gemini 3.5 Flash (Low)',
+      'Gemini 3.1 Pro (Low)', 'Gemini 3.1 Pro (High)',
+      'Claude Sonnet 4.6 (Thinking)', 'Claude Opus 4.6 (Thinking)',
+      'GPT-OSS 120B (Medium)',
+    ],
+    defaultModel: 'Gemini 3.1 Pro (High)',
+    modelFlag: '--model',
+  },
 };
 
 /** hex "#f26522" → an ANSI 24-bit foreground escape. Falls back to plain orange. */

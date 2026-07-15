@@ -61,11 +61,29 @@ test('start can launch Codex and resume the same agent for that worktree', async
 
   const resumed = await gw(fx, ['start', id]);
   assert.equal(resumed.code, 0, resumed.stderr);
-  assert.equal(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), 'codex resume --last');
+  assert.equal(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), 'codex\nresume\n--last');
 
   const clean = await gw(fx, ['start', id, '--no-continue']);
   assert.equal(clean.code, 0, clean.stderr);
   assert.equal(Buffer.from(clean.directive[3], 'base64').toString('utf8'), 'codex');
+});
+
+test('a model name containing spaces/parens (agy) survives the launcher argv intact', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const started = await gw(fx, ['start', '--agent', 'agy', '--model', 'Gemini 3.1 Pro (High)'], { stdin: 'add an agy path\n' });
+  assert.equal(started.code, 0, started.stderr);
+  const id = path.basename(started.directive[1]);
+  assert.equal(
+    Buffer.from(started.directive[3], 'base64').toString('utf8'),
+    'agy\n--dangerously-skip-permissions\n--model\nGemini 3.1 Pro (High)',
+  );
+
+  const resumed = await gw(fx, ['start', id]);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(
+    Buffer.from(resumed.directive[3], 'base64').toString('utf8'),
+    'agy\n--dangerously-skip-permissions\n--continue\n--model\nGemini 3.1 Pro (High)',
+  );
 });
 
 test('legacy sessions without agent metadata resume with the configured default agent', async () => {
@@ -74,7 +92,7 @@ test('legacy sessions without agent metadata resume with the configured default 
   fs.rmSync(path.join(fx.sessionDir(id), '.gw-agent.json'));
   const resumed = await gw(fx, ['start', id]);
   assert.equal(resumed.code, 0, resumed.stderr);
-  assert.match(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), /^claude .*--continue/);
+  assert.match(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), /^claude\n[\s\S]*--continue/);
 });
 
 test('done with no changes reports nothing to merge and removes the session', async () => {

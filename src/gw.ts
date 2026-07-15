@@ -286,7 +286,10 @@ async function cmdStart(flags: Flags): Promise<void> {
     if (selected.agent === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, resumeId));
     const base = flags.noContinue ? agent.launcher : agent.resumeLauncher;
     const argv = withModel(agent, base, selected.model);
-    emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, resumeId), '', b64(argv.join(' ')));
+    // Newline-joined, not space-joined: some agents' model names contain spaces/parens
+    // (e.g. agy's "Gemini 3.1 Pro (High)") that a space-join + shell word-split would
+    // shatter into extra argv words. gw.sh splits this back out by line, not by IFS.
+    emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, resumeId), '', b64(argv.join('\n')));
     return;
   }
 
@@ -315,7 +318,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')} with ${agentKey}${model ? ` on ${model}` : ''}`);
   if (agentKey === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, id));
   const launcher = withModel(agent, agent.launcher, model ?? null);
-  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join(' ')));
+  emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join('\n')));
 }
 
 // Resolve which session a `done`/`abort` acts on: an explicit positional session-id wins,
@@ -807,6 +810,7 @@ async function cmdDoctor(): Promise<void> {
     ['gh', false, 'only for --pr and `gw init --repo`'],
     ['claude', false, 'Claude Code agent option'],
     ['codex', false, 'Codex agent option'],
+    ['agy', false, 'Antigravity CLI agent option'],
   ];
   for (const [bin, required, note] of tools) {
     const found = (await run('bash', ['-lc', `command -v ${bin}`])).code === 0;
@@ -844,6 +848,9 @@ async function cmdSetup(): Promise<void> {
   const dstDir = path.join(os.homedir(), '.claude', 'commands');
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   const codexSkills = path.join(codexHome, 'skills');
+  // Antigravity (agy) reads global skills from ~/.gemini/config/skills/<name>/SKILL.md
+  // (its "customization root" — see agy's own agy-customizations skill docs).
+  const agySkills = path.join(os.homedir(), '.gemini', 'config', 'skills');
   fs.mkdirSync(dstDir, { recursive: true });
   // Bake absolute paths into the installed slash commands so /done works from ANY
   // repo's worktree (which has no gw checkout of its own — it must call gw by path).
@@ -855,21 +862,24 @@ async function cmdSetup(): Promise<void> {
     fs.writeFileSync(path.join(dstDir, f), body);
     log(`installed /${f.replace('.md', '')} -> ~/.claude/commands/${f}`);
 
-    // Codex exposes reusable workflows as skills. Keep one source of truth for the
-    // landing instructions, adapting only the invocation name and safety flag.
+    // Codex and Antigravity (agy) both expose reusable workflows as skills, not slash
+    // commands. Keep one source of truth for the landing instructions, adapting only
+    // the invocation name and safety flag, and install it to both agents' skill roots.
     const short = f.replace('.md', '');
     const skillName = `gw-${short}`;
-    const skillDir = path.join(codexSkills, skillName);
-    fs.mkdirSync(skillDir, { recursive: true });
     const skillBody = body
       .replace(/^---\n/, `---\nname: ${skillName}\n`)
       .replaceAll('--in-claude', '--in-agent')
       .replaceAll(`/${short}`, `$${skillName}`);
-    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillBody);
-    log(`installed $${skillName} -> ${path.join(skillDir, 'SKILL.md')}`);
+    for (const skillsRoot of [codexSkills, agySkills]) {
+      const skillDir = path.join(skillsRoot, skillName);
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillBody);
+      log(`installed $${skillName} -> ${path.join(skillDir, 'SKILL.md')}`);
+    }
   }
   for (const k of REPO_KEYS) log(`${fs.existsSync(path.join(REPOS[k].dir, '.git')) ? 'ok' : '!!'}  ${k} repo at ${REPOS[k].dir}`);
-  for (const bin of ['git', 'gh', 'claude', 'codex', 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
+  for (const bin of ['git', 'gh', 'claude', 'codex', 'agy', 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
   log(rcFilesSourcing().length ? `shell: gw.sh already sourced (gw doctor to verify).` : `enable the gw command:  gw install   (adds '${sourceLine()}' to your shell rc)`);
 }
 
