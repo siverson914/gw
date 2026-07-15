@@ -104,9 +104,18 @@ export interface GwResult { code: number; stdout: string; stderr: string; direct
 export function gw(fx: Fixture, args: string[], opts: { cwd?: string; env?: Record<string, string>; stdin?: string } = {}): Promise<GwResult> {
   const out = path.join(fx.root, `.gw-out-${Math.random().toString(36).slice(2)}`);
   return new Promise((resolve, reject) => {
+    // Strip GW_BASE/GW_CHANGED_FILES inherited from our own parent process before
+    // merging in process.env: when THIS test suite is itself run as a `gw done` gate
+    // (i.e. someone is landing a change to the gw repo), that outer gate sets GW_BASE
+    // on our env for its own diff-scoping purposes (see runGates in gw.ts). Left in
+    // place, it'd leak into this nested gw invocation's bind() and stomp the fixture's
+    // own "main" base with the outer process's "origin/<base>" — breaking every fetch
+    // the fixture does against its local bare "origin". The fixture's base always comes
+    // from its own generated gw.config.json.
+    const { GW_BASE: _leakedBase, GW_CHANGED_FILES: _leakedChanged, ...inheritedEnv } = process.env;
     const child = spawn(TSX, [GW_TS, ...args], {
       cwd: opts.cwd ?? fx.root,
-      env: { ...process.env, ...GIT_ENV, GW_ROOT: fx.root, GW_OUT: out, ...opts.env },
+      env: { ...inheritedEnv, ...GIT_ENV, GW_ROOT: fx.root, GW_OUT: out, ...opts.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
