@@ -72,6 +72,31 @@ import {
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url)); // .../gw/src
 const GW_HOME = path.resolve(SCRIPT_DIR, '..');                  // the gw install root
 
+// ── built-in agent options ───────────────────────────────────────────────────
+// config.ts's DEFAULT_AGENTS (launcher/resume/model presets) is the one table
+// for what `gw start`'s Run-with picker offers. This is its thin companion:
+// what gw's OWN tooling (doctor/setup) needs to know per agent — the binary to
+// probe for, and, for tools that install gw's landing workflow as a SKILL.md
+// rather than a Claude-style slash command, where that skill root lives.
+// Claude gets slash commands (installed separately in cmdSetup, below); Codex
+// and Antigravity get skills. Adding a built-in agent option = one entry here
+// (+ one in DEFAULT_AGENTS for its launch/resume/model presets). gw stays
+// standalone — no cross-repo imports, just a plain local array.
+interface AgentTool { key: string; binary: string; doctorNote: string; skillsRoot?: () => string; }
+const AGENT_TABLE: AgentTool[] = [
+  { key: 'claude', binary: 'claude', doctorNote: 'Claude Code agent option' },
+  {
+    key: 'codex', binary: 'codex', doctorNote: 'Codex agent option',
+    skillsRoot: () => path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills'),
+  },
+  {
+    key: 'agy', binary: 'agy', doctorNote: 'Antigravity CLI agent option',
+    // agy reads global skills from ~/.gemini/config/skills/<name>/SKILL.md
+    // (its "customization root" — see agy's own agy-customizations skill docs).
+    skillsRoot: () => path.join(os.homedir(), '.gemini', 'config', 'skills'),
+  },
+];
+
 // ── workspace binding ── set once at startup (after loadWorkspace), so the rest of
 // this file reads paths/repos from module locals exactly like the original did.
 let WS: Workspace;
@@ -808,9 +833,7 @@ async function cmdDoctor(): Promise<void> {
   const tools: Array<[string, boolean, string]> = [
     ['git', true, 'required for everything'],
     ['gh', false, 'only for --pr and `gw init --repo`'],
-    ['claude', false, 'Claude Code agent option'],
-    ['codex', false, 'Codex agent option'],
-    ['agy', false, 'Antigravity CLI agent option'],
+    ...AGENT_TABLE.map((a): [string, boolean, string] => [a.binary, false, a.doctorNote]),
   ];
   for (const [bin, required, note] of tools) {
     const found = (await run('bash', ['-lc', `command -v ${bin}`])).code === 0;
@@ -846,11 +869,7 @@ function tsxCmd(): string {
 async function cmdSetup(): Promise<void> {
   const srcDir = path.join(GW_HOME, 'commands');
   const dstDir = path.join(os.homedir(), '.claude', 'commands');
-  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const codexSkills = path.join(codexHome, 'skills');
-  // Antigravity (agy) reads global skills from ~/.gemini/config/skills/<name>/SKILL.md
-  // (its "customization root" — see agy's own agy-customizations skill docs).
-  const agySkills = path.join(os.homedir(), '.gemini', 'config', 'skills');
+  const skillRoots = AGENT_TABLE.filter((a) => a.skillsRoot).map((a) => a.skillsRoot!());
   fs.mkdirSync(dstDir, { recursive: true });
   // Bake absolute paths into the installed slash commands so /done works from ANY
   // repo's worktree (which has no gw checkout of its own — it must call gw by path).
@@ -871,7 +890,7 @@ async function cmdSetup(): Promise<void> {
       .replace(/^---\n/, `---\nname: ${skillName}\n`)
       .replaceAll('--in-claude', '--in-agent')
       .replaceAll(`/${short}`, `$${skillName}`);
-    for (const skillsRoot of [codexSkills, agySkills]) {
+    for (const skillsRoot of skillRoots) {
       const skillDir = path.join(skillsRoot, skillName);
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillBody);
@@ -879,7 +898,7 @@ async function cmdSetup(): Promise<void> {
     }
   }
   for (const k of REPO_KEYS) log(`${fs.existsSync(path.join(REPOS[k].dir, '.git')) ? 'ok' : '!!'}  ${k} repo at ${REPOS[k].dir}`);
-  for (const bin of ['git', 'gh', 'claude', 'codex', 'agy', 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
+  for (const bin of ['git', 'gh', ...AGENT_TABLE.map((a) => a.binary), 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
   log(rcFilesSourcing().length ? `shell: gw.sh already sourced (gw doctor to verify).` : `enable the gw command:  gw install   (adds '${sourceLine()}' to your shell rc)`);
 }
 
@@ -1155,20 +1174,18 @@ async function cmdInit(flags: Flags): Promise<void> {
   const repos = [];
   for (const dir of entries) { const r = await detectRepo(root, dir); repos.push(r); log(`detected ${r.key} (${r.slug || 'no remote'}, base ${r.base}, gate ${r.gate ? r.gate.join(' ') : 'none'})`); }
 
+  // No `agents` override here: loadWorkspace() already merges every
+  // DEFAULT_AGENTS entry (claude, codex, agy - see config.ts) in as the
+  // baseline, so a scaffolded config that hand-restated one agent's presets
+  // (this used to duplicate codex's models/launcher verbatim) would only
+  // ever go stale relative to that one real source of truth. Nothing to
+  // override by default; `gw.config.json agents.<key>` stays the documented
+  // way to customize one later.
   const config: RawConfig = {
     base: 'main',
     launcher: DEFAULT_LAUNCHER,
     namer: DEFAULT_NAMER,
     defaultAgent: 'claude',
-    agents: {
-      claude: { models: ['fable', 'opus', 'sonnet', 'haiku'], defaultModel: 'sonnet' },
-      codex: {
-        launcher: 'codex',
-        resumeLauncher: 'codex resume --last',
-        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
-        defaultModel: 'gpt-5.6-terra',
-      },
-    },
     brandColor: DEFAULT_BRAND,
     repos,
   };
