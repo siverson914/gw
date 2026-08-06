@@ -409,8 +409,9 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
       }
     }
     if (!inPicker()) {
+      // Both states render "[ label ]" at identical width so focus never shifts the row.
       const btn = (label: string, focused: boolean): string =>
-        focused ? `${ORANGE}${INV}${BOLD} ${label} ${RESET}` : `${DIM}[${RESET} ${label} ${DIM}]${RESET}`;
+        focused ? `${ORANGE}[${INV}${BOLD} ${label} ${RESET}${ORANGE}]${RESET}` : `${DIM}[${RESET} ${label} ${DIM}]${RESET}`;
       out.push(`  ${btn('Go', focus === 'go')}  ${btn('Cancel', focus === 'cancel')}${flatChoices.length ? `  ${btn('Change model', focus === 'change')}` : ''}`);
     }
     out.push(inPicker()
