@@ -167,8 +167,8 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` â
       "defaultModel": "claude-sonnet-5"
     },
     "codex": {
-      "launcher": "codex",
-      "resumeLauncher": "codex resume --last",
+      "launcher": "codex --ask-for-approval never --sandbox danger-full-access",
+      "resumeLauncher": "codex resume --last --ask-for-approval never --sandbox danger-full-access",
       "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
       "defaultModel": "gpt-5.6-terra"
     }

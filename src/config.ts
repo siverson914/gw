@@ -119,8 +119,16 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     effortFlag: '--effort',
   },
   codex: {
-    launcher: 'codex',
-    resumeLauncher: 'codex resume --last',
+    // --ask-for-approval never: Codex's default `untrusted` policy escalates on nearly
+    // every command in a gw worktree (each session is a brand-new path never in
+    // ~/.codex/config.toml's trusted [projects]). Parity with claude/grok
+    // (--permission-mode auto) and agy (--dangerously-skip-permissions).
+    // --sandbox danger-full-access, not workspace-write: a gw worktree writes outside
+    // cwd by design (.git is a pointer into the canonical clone, node_modules/.env are
+    // symlinks out of the session dir, `gw done` merges into the canonical repos), and
+    // under `-a never` those writes fail silently back to the model instead of prompting.
+    launcher: 'codex --ask-for-approval never --sandbox danger-full-access',
+    resumeLauncher: 'codex resume --last --ask-for-approval never --sandbox danger-full-access',
     models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
     defaultModel: 'gpt-5.6-terra',
     modelFlag: '--model',

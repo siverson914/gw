@@ -53,7 +53,7 @@ test('start can launch Codex and resume the same agent for that worktree', async
   const started = await gw(fx, ['start', '--agent', 'codex'], { stdin: 'add a codex path\n' });
   assert.equal(started.code, 0, started.stderr);
   const id = path.basename(started.directive[1]);
-  assert.match(Buffer.from(started.directive[3], 'base64').toString('utf8'), /^codex$/);
+  assert.match(Buffer.from(started.directive[3], 'base64').toString('utf8'), /^codex\n--ask-for-approval\nnever\n--sandbox\ndanger-full-access$/);
   assert.deepEqual(
     JSON.parse(fs.readFileSync(path.join(fx.sessionDir(id), '.gw-agent.json'), 'utf8')),
     { agent: 'codex', model: null, effort: null },
@@ -61,11 +61,11 @@ test('start can launch Codex and resume the same agent for that worktree', async
 
   const resumed = await gw(fx, ['start', id]);
   assert.equal(resumed.code, 0, resumed.stderr);
-  assert.equal(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), 'codex\nresume\n--last');
+  assert.equal(Buffer.from(resumed.directive[3], 'base64').toString('utf8'), 'codex\nresume\n--last\n--ask-for-approval\nnever\n--sandbox\ndanger-full-access');
 
   const clean = await gw(fx, ['start', id, '--no-continue']);
   assert.equal(clean.code, 0, clean.stderr);
-  assert.equal(Buffer.from(clean.directive[3], 'base64').toString('utf8'), 'codex');
+  assert.equal(Buffer.from(clean.directive[3], 'base64').toString('utf8'), 'codex\n--ask-for-approval\nnever\n--sandbox\ndanger-full-access');
 });
 
 test('a model name containing spaces/parens (agy) survives the launcher argv intact', async () => {
@@ -115,14 +115,14 @@ test('--effort with a config-key effort flag (codex) glues the value onto the ov
   const id = path.basename(started.directive[1]);
   assert.equal(
     Buffer.from(started.directive[3], 'base64').toString('utf8'),
-    'codex\n-c\nmodel_reasoning_effort=xhigh',
+    'codex\n--ask-for-approval\nnever\n--sandbox\ndanger-full-access\n-c\nmodel_reasoning_effort=xhigh',
   );
 
   const resumed = await gw(fx, ['start', id]);
   assert.equal(resumed.code, 0, resumed.stderr);
   assert.equal(
     Buffer.from(resumed.directive[3], 'base64').toString('utf8'),
-    'codex\nresume\n--last\n-c\nmodel_reasoning_effort=xhigh',
+    'codex\nresume\n--last\n--ask-for-approval\nnever\n--sandbox\ndanger-full-access\n-c\nmodel_reasoning_effort=xhigh',
   );
 });
 
