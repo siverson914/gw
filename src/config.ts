@@ -48,7 +48,7 @@ export interface RawConfig {
   resumeArgs?: string[];               // extra launcher args when RESUMING a session, to continue the prior
                                        // conversation (default: ["--continue"], for the claude launcher). Set
                                        // [] for a launcher with no resume concept; --no-continue skips it per-run.
-  namer?: string;                      // command that titles a session from its prompt (default: claude --model haiku)
+  namer?: string;                      // command that titles a session from its prompt (default: claude --model claude-haiku-4-5)
   defaultAgent?: string;               // agent preselected by gw start (default: "claude")
   agents?: Record<string, RawAgentCfg>;// launch/resume/model presets shown in gw start
   brandColor?: string;                 // hex, for the banner + prompt box (default: Porsche orange #f26522)
@@ -103,14 +103,16 @@ export interface Workspace {
 
 export const DEFAULT_LAUNCHER = 'claude --permission-mode auto';
 export const DEFAULT_RESUME_ARGS = ['--continue']; // claude: continue the worktree's prior conversation
-export const DEFAULT_NAMER = 'claude --model haiku';
+export const DEFAULT_NAMER = 'claude --model claude-haiku-4-5';
 export const DEFAULT_BRAND = '#f26522'; // Porsche Signal Orange
 export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
   claude: {
     launcher: DEFAULT_LAUNCHER,
     resumeLauncher: `${DEFAULT_LAUNCHER} --continue`,
-    models: ['fable', 'opus', 'sonnet', 'haiku'],
-    defaultModel: 'sonnet',
+    // Full model ids (not bare aliases) so a session's launch line always shows
+    // the exact version being run: Fable 5, Opus 5, Sonnet 5, Haiku 4.5.
+    models: ['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    defaultModel: 'claude-sonnet-5',
     modelFlag: '--model',
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], // `claude --help`: --effort choices
     defaultEffort: null,

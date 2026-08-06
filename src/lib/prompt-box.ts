@@ -9,8 +9,8 @@
  *   │ fix the thing where…█                    │
  *   │                                          │
  *   ╰──────────────────────────────────────────╯
- *    Claude:  fable       opus          ▐sonnet▌       haiku
- *    Codex:   gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna  gpt-5.5  gpt-5.4  gpt-5.4-mini
+ *    Claude:  claude-fable-5 claude-opus-5 ▐claude-sonnet-5▌ claude-haiku-4-5
+ *    Codex:   gpt-5.6-sol    gpt-5.6-terra gpt-5.6-luna      gpt-5.5  gpt-5.4  gpt-5.4-mini
  *    Grok:    grok-4.5
  *    Effort:  ▐default▌   low           medium        high
  *    [ Go ]  [ Cancel ]

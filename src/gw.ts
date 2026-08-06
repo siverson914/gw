@@ -364,8 +364,9 @@ async function cmdStart(flags: Flags): Promise<void> {
   const prompt = input.text;
   if (prompt) log('naming session ...');
   // The namer's one Haiku call also infers a model when the prompt explicitly names
-  // one (opus/sonnet/haiku/fable) — the fallback for piped starts, where no picker
-  // ran. Absent both, the launcher runs on its own default model.
+  // one (opus/sonnet/haiku/fable, mapped to the full versioned model id) — the
+  // fallback for piped starts, where no picker ran. Absent both, the launcher runs
+  // on its own default model.
   const { slug, model: inferred } = await smartSlug(prompt, { namer: WS.namer });
   const choices = launchChoices();
   const picked = input.choice ?? undefined;

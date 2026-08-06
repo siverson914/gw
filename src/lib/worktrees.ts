@@ -98,17 +98,24 @@ export function activityLabel(startSec: number | null, lastSec: number | null, n
 }
 
 // LLM-assisted session title: ask the configured `namer` command (default
-// `claude --model haiku` — already a hard gw dependency since gw launches the agent
+// `claude --model claude-haiku-4-5` — already a hard gw dependency since gw launches the agent
 // in every session) for a 2-4 word area-first label of the prompt, then slugify it
 // (slugify dashes any spaces/slashes, so the label stays a safe dir/tab basename). One-shot,
 // a few seconds. Any failure — binary missing, timeout, non-zero exit, prose/refusal
 // instead of a title — falls back to slugify(prompt), so naming can never block or
 // break a session start. Only the first 1000 chars are sent, in case the prompt is a
 // giant pasted log.
-// Models the namer is allowed to infer from the prompt. Kept to `claude --model`
-// aliases so an inferred value is always a safe, complete argv token — never
-// arbitrary flags. Anything the namer emits outside this set is ignored.
-const NAMER_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable']);
+// Models the namer is allowed to infer from the prompt. The namer emits short
+// alias tokens (@opus etc.), which map here to full versioned model ids so the
+// launched session always shows exactly which model is running. The allowlist
+// also keeps an inferred value a safe, complete argv token — never arbitrary
+// flags. Anything the namer emits outside this set is ignored.
+const NAMER_MODELS = new Map([
+  ['fable', 'claude-fable-5'],
+  ['opus', 'claude-opus-5'],
+  ['sonnet', 'claude-sonnet-5'],
+  ['haiku', 'claude-haiku-4-5'],
+]);
 
 export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec?: typeof run; namer?: string[] } = {}): Promise<{ slug: string; model?: string }> {
   const { timeoutMs = 20_000, exec = run, namer = DEFAULT_NAMER.split(/\s+/) } = opts;
@@ -138,8 +145,9 @@ export async function smartSlug(prompt: string, opts: { timeoutMs?: number; exec
       const words = out.split(/\s+/).filter(Boolean);
       let model: string | undefined;
       const last = words[words.length - 1];
-      if (last?.startsWith('@') && NAMER_MODELS.has(last.slice(1).toLowerCase())) {
-        model = last.slice(1).toLowerCase();
+      const mapped = last?.startsWith('@') ? NAMER_MODELS.get(last.slice(1).toLowerCase()) : undefined;
+      if (mapped) {
+        model = mapped;
         words.pop();
       }
       // Accept only what looks like an actual title: one line, 1-6 words (after the
