@@ -189,8 +189,9 @@ function seedMcpApproval(dir: string): void {
 
 // Read the seed prompt (and the model to run it on) HERE, never through a shell — so
 // quotes/$/!/backticks in the prompt are taken literally. On a TTY this is the promptBox
-// editor (lib/prompt-box): write the prompt, pick the model on the row under the box,
-// then Go. Returns null if the user cancels; empty text = a plain session. Piped stdin
+// editor (lib/prompt-box): write the prompt, Tab to Go (the line under the box shows
+// which model launches; [Change model] opens the provider/model picker), Enter.
+// Returns null if the user cancels; empty text = a plain session. Piped stdin
 // has no picker — model comes back null and the namer's inference decides.
 const PROMPT_MAX = 100_000;
 async function readPrompt(): Promise<{ text: string; choice: LaunchChoice | null; effort: string | null } | null> {
@@ -241,11 +242,13 @@ function launchChoices(): LaunchChoice[] {
   }
   return out;
 }
-function launchChoiceRows(choices: LaunchChoice[]): Array<{ header: string; options: string[] }> {
-  return Object.keys(WS.agents).map(agent => ({
-    header: `${title(agent)}:`,
-    options: choices.filter(c => c.agent === agent).map(c => c.display),
-  }));
+function launchChoiceRows(choices: LaunchChoice[]): Array<{ header: string; options: string[]; initial: number }> {
+  return Object.entries(WS.agents).map(([key, agent]) => {
+    const options = choices.filter(c => c.agent === key).map(c => c.display);
+    // initial: where this provider's model list opens when it is not the remembered
+    // pick (the remembered pick overrides for its own provider inside the box).
+    return { header: title(key), options, initial: Math.max(0, options.indexOf(agent.defaultModel ?? '')) };
+  });
 }
 // The effort axis, one entry per agent row. 'default' (pass no flag — the provider
 // picks) always leads, so every agent has an explicit no-override choice.

@@ -1,52 +1,65 @@
 /**
- * prompt-box — a tiny, zero-dependency terminal editor used by `gw start`.
+ * prompt-box: a tiny, zero-dependency terminal editor used by `gw start`.
  *
- * Draws a bordered multi-line edit box, optional aligned choice rows (the
- * agent/model picker), and [Go] / [Cancel] buttons:
+ * Draws a bordered multi-line edit box, a one-line summary of the model the
+ * session will launch with, and [Go] / [Cancel] / [Change model] buttons:
  *
  *   Enter starting prompt: (empty = plain session)
  *   ╭──────────────────────────────────────────╮
  *   │ fix the thing where…█                    │
  *   │                                          │
  *   ╰──────────────────────────────────────────╯
- *    Claude:  claude-fable-5 claude-opus-5 ▐claude-sonnet-5▌ claude-haiku-4-5
- *    Codex:   gpt-5.6-sol    gpt-5.6-terra gpt-5.6-luna      gpt-5.5  gpt-5.4  gpt-5.4-mini
- *    Grok:    grok-4.5
- *    Effort:  ▐default▌   low           medium        high
- *    [ Go ]  [ Cancel ]
+ *    Model: claude-sonnet-5 · high effort  (Claude)
+ *    [ Go ]  [ Cancel ]  [ Change model ]
  *    Tab: move · Enter: newline · Ctrl+D: Go · Ctrl+C: cancel
  *
- * Tab / Shift+Tab cycle focus edit → model → effort → Go → Cancel; on a choice row
- * ←/→ (or a letter, or 1-9) pick and Enter advances. So the flow reads top to
- * bottom: write the prompt, choose the model, choose the effort, Go. Typing while a
- * button is focused jumps back into the editor.
+ * Tab cycles edit → Go → Cancel → Change model, so the common path is: write
+ * the prompt, Tab once, Enter. The summary line always shows exactly what [Go]
+ * will launch; the picker only unfolds when asked for.
  *
- * The effort row is a second, independent axis: its options belong to the agent row
- * the model selection sits on, and swap when the model selection moves to another
- * agent (each agent's effort pick is remembered while the box is open).
+ * [Change model] opens a two-step picker (three when the provider has an
+ * effort axis), each list numbered one option per line:
+ *
+ *    Provider:                Claude model:            Effort:
+ *     1: Claude                1: claude-fable-5        1: default
+ *     2: Codex                 2: claude-opus-5         2: low
+ *     3: Grok                  3: claude-sonnet-5       3: medium
+ *     4: Agy                   4: claude-haiku-4-5      ...
+ *
+ * In a list: press the number to choose in a single keystroke, or move with
+ * ↑/↓ (letters jump to the next match) and confirm with Enter or Tab. Esc,
+ * Backspace, ← or Shift+Tab step back a level. After the last step the picker
+ * collapses and focus lands on [Go], so a full model change is e.g. "2 3 Enter".
+ * Each provider remembers its model + effort picks while the box is open; the
+ * box opens on the last chosen model (choices.initial) and other providers
+ * open on their own default (rows[].initial).
  *
  * Editing: soft word wrap at spaces (a word only splits when it can't fit a row),
  * arrows / Home / End / PgUp / PgDn move, Ctrl/Alt+←/→ (and Alt+B/F) move by word,
  * Ctrl+Home/End jump to start/end of the whole prompt, Backspace/Delete,
  * Ctrl+W / Alt+Backspace (kill word left), Ctrl+A/E (row home/end), Ctrl+K (kill to
- * end of line), Ctrl+U (kill to start of line), Ctrl+Z / Ctrl+Y (undo / redo — a run
+ * end of line), Ctrl+U (kill to start of line), Ctrl+Z / Ctrl+Y (undo / redo; a run
  * of typing undoes as one). The display viewport scrolls, so huge pastes are fine.
  *
  * Finish signals, newest to oldest: Enter on [Go]; Ctrl+D; a typed line
- * containing only "." (kept for muscle memory from the pre-box reader — raw
- * Ctrl-D delivery is unreliable under WSL/ConPTY, which is why the dot
- * sentinel existed). Cancel: Enter on [Cancel], or Ctrl+C.
+ * containing only "." (kept for muscle memory from the pre-box reader, since
+ * raw Ctrl-D delivery is unreliable under WSL/ConPTY). Cancel: Enter on
+ * [Cancel], or Ctrl+C.
  *
  * Paste safety: bracketed paste mode is enabled, so pasted newlines insert
  * literally (they never trigger the dot sentinel or button focus) and a
  * multi-megabyte paste inserts as chunks, capped at maxLen.
  *
  * Why hand-rolled: the only consumers are gw's interactive moments, and gw
- * stays dependency-free. Rendering redraws a fixed-height block in place via
- * relative cursor moves; the real cursor stays hidden and an inverse-video cell
- * marks the edit position. Known cosmetic limit: double-width glyphs (CJK/emoji)
- * count as one column, so lines containing them can wrap a cell early — content
- * is still correct.
+ * stays dependency-free. Rendering redraws the block in place via relative
+ * cursor moves; the block's height varies with the picker state, so each draw
+ * remembers how many lines it wrote and the next one climbs exactly that far
+ * (a fixed-height climb once drifted when a too-wide choice row wrapped,
+ * repeating the header on every keystroke; every line is now also clipped to
+ * the terminal width so nothing can wrap). The real cursor stays hidden and an
+ * inverse-video cell marks the edit position. Known cosmetic limit:
+ * double-width glyphs (CJK/emoji) count as one column, so lines containing
+ * them can wrap a cell early; content is still correct.
  */
 
 const ESC = '\x1b';
@@ -57,28 +70,28 @@ const INV = `${ESC}[7m`;
 const DEFAULT_ORANGE = `${ESC}[38;2;242;101;34m`; // Porsche Signal Orange #f26522
 
 const ROWS = 8;             // visible editor rows (content scrolls beyond this)
-const BASE_H = ROWS + 5;    // header + top border + ROWS + bottom border + buttons + hint
 const PASTE_END = `${ESC}[201~`;
 const UNDO_MAX = 200;
+const ESC_LONE_MS = 60;     // a lone ESC byte older than this is the Esc key, not a sequence prefix
 
-type Focus = 'edit' | 'model' | 'effort' | 'go' | 'cancel';
+type Focus = 'edit' | 'go' | 'cancel' | 'change' | 'provider' | 'pmodel' | 'peffort';
 interface DRow { line: number; start: number; text: string; last: boolean } // last = final row of its logical line
 interface Snap { lines: string[]; cl: number; cc: number }
 
 export interface PromptBoxChoices {
   header?: string;    // label for a legacy single row, e.g. "Model:"
   options?: string[]; // legacy single-row choices
-  rows?: Array<{ header: string; options: string[] }>;
-  initial?: number;  // index selected on open (default 0)
-  /** Optional second axis, one entry per rows[] entry: the effort row shows the
-   *  options of whichever row the main selection sits on. */
+  rows?: Array<{ header: string; options: string[]; initial?: number }>; // initial = the row's own default option
+  initial?: number;  // flat index selected on open (default 0)
+  /** Optional second axis, one entry per rows[] entry: the effort step offers the
+   *  options of whichever row the model pick landed on. */
   effort?: { header: string; perRow: Array<{ options: string[]; initial: number }> };
 }
 export interface PromptBoxOptions {
   header?: string;
   maxLen?: number;
   color?: string;
-  choices?: PromptBoxChoices; // omit for a plain prompt box with no choice row
+  choices?: PromptBoxChoices; // omit for a plain prompt box with no model line
 }
 export interface PromptBoxResult {
   text: string;
@@ -101,14 +114,12 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   const rawRows = choices?.rows?.length
     ? choices.rows
     : choices?.options?.length ? [{ header: choices.header ?? '', options: choices.options }] : [];
-  const keep = rawRows.map(r => r.options.length > 0);
-  const choiceRows = rawRows.filter((_, i) => keep[i]);
+  const choiceRows = rawRows.filter(r => r.options.length > 0);
   const flatChoices = choiceRows.flatMap(r => r.options);
   // The effort axis rides along only when it aligns 1:1 with the rows it annotates.
   const effortCfg = choices?.effort && choices.effort.perRow.length === rawRows.length
-    ? { header: choices.effort.header, perRow: choices.effort.perRow.filter((_, i) => keep[i]) }
+    ? { header: choices.effort.header, perRow: choices.effort.perRow.filter((_, i) => rawRows[i].options.length > 0) }
     : null;
-  const BLOCK_H = BASE_H + choiceRows.length + (effortCfg ? 1 : 0);
   const stdin = process.stdin;
   const err = process.stderr;
   const w = (s: string): boolean => err.write(s);
@@ -123,11 +134,36 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   let pend = '';             // unconsumed input (escape sequences can split across chunks)
   let paste = false;         // inside a bracketed paste
   let drawn = false;
+  let drawnH = 0;            // lines the previous render wrote; the next one climbs exactly this far
   let done = false;
+
+  // ── choice state ──
+  // sel is the committed flat selection; the p* variables are the picker's transient
+  // highlights and only fold into sel/esel when a step is confirmed.
   let sel = flatChoices.length ? Math.max(0, Math.min(flatChoices.length - 1, choices?.initial ?? 0)) : 0;
-  // Per-row effort selection — each agent row remembers its own pick while the box is open.
+  const rowOffset = (row: number): number => choiceRows.slice(0, row).reduce((n, r) => n + r.options.length, 0);
+  const selectedRC = (): [number, number] => {
+    let offset = 0;
+    for (let row = 0; row < choiceRows.length; row++) {
+      if (sel < offset + choiceRows[row].options.length) return [row, sel - offset];
+      offset += choiceRows[row].options.length;
+    }
+    return [0, 0];
+  };
+  // Per-row model memory: each provider opens its list on its own default (rows[].initial),
+  // the provider holding the committed selection opens on that instead, and picks made
+  // while the box is open are remembered.
+  const rsel = choiceRows.map(r => Math.max(0, Math.min(r.options.length - 1, r.initial ?? 0)));
+  if (flatChoices.length) { const [r, c] = selectedRC(); rsel[r] = c; }
+  // Per-row effort memory, same idea.
   const esel = (effortCfg?.perRow ?? []).map(p =>
     p.options.length ? Math.max(0, Math.min(p.options.length - 1, p.initial)) : 0);
+  const effortOpts = (row: number): string[] => effortCfg?.perRow[row]?.options ?? [];
+  let pRow = 0;              // provider-list highlight
+  let pendRow = 0;           // provider confirmed in step 1, owning steps 2/3
+  let pCol = 0;              // model-list highlight
+  let pEff = 0;              // effort-list highlight
+
   const undo: Snap[] = [], redo: Snap[] = [];
   let lastKind = '';         // edit kind of the previous mutation, for undo coalescing
 
@@ -275,9 +311,54 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
   function docHome(): void { cl = 0; cc = 0; }
   function docEnd(): void { cl = lines.length - 1; cc = lines[cl].length; }
 
-  // ── render: redraw the whole fixed-height block in place ──
+  // ── picker flow ──
+  const inPicker = (): boolean => focus === 'provider' || focus === 'pmodel' || focus === 'peffort';
+  const provName = (row: number): string => (choiceRows[row]?.header ?? '').replace(/:$/, '') || `provider ${row + 1}`;
+  function openPicker(): void {
+    const [row, col] = selectedRC();
+    if (choiceRows.length > 1) { pRow = row; focus = 'provider'; }
+    else { pendRow = 0; pCol = col; focus = 'pmodel'; } // single provider: no step 1
+  }
+  function chooseProvider(i: number): void {
+    pendRow = i;
+    const [row, col] = selectedRC();
+    pCol = i === row ? col : rsel[i];
+    focus = 'pmodel';
+  }
+  function chooseModel(i: number): void {
+    sel = rowOffset(pendRow) + i;
+    rsel[pendRow] = i;
+    if (effortOpts(pendRow).length > 1) { pEff = esel[pendRow]; focus = 'peffort'; }
+    else focus = 'go'; // done — land on [Go]
+  }
+  function chooseEffort(i: number): void { esel[pendRow] = i; focus = 'go'; }
+  /** The current list's (options, highlight, choose) triple. */
+  function pickerList(): { opts: string[]; hi: number; choose: (i: number) => void } {
+    if (focus === 'provider') return { opts: choiceRows.map((_, i) => provName(i)), hi: pRow, choose: chooseProvider };
+    if (focus === 'pmodel') return { opts: choiceRows[pendRow].options, hi: pCol, choose: chooseModel };
+    return { opts: effortOpts(pendRow), hi: pEff, choose: chooseEffort };
+  }
+  function pickerMove(d: number): void {
+    const { opts } = pickerList();
+    if (!opts.length) return;
+    if (focus === 'provider') pRow = (pRow + d + opts.length) % opts.length;
+    else if (focus === 'pmodel') pCol = (pCol + d + opts.length) % opts.length;
+    else pEff = (pEff + d + opts.length) % opts.length;
+  }
+  function pickerConfirm(): void { const { hi, choose } = pickerList(); choose(hi); }
+  /** Step back one level; returns false when already collapsed. */
+  function pickerBack(): boolean {
+    if (focus === 'peffort') { focus = 'pmodel'; return true; }
+    if (focus === 'pmodel') { focus = choiceRows.length > 1 ? 'provider' : 'change'; return true; }
+    if (focus === 'provider') { focus = 'change'; return true; }
+    return false;
+  }
+
+  // ── render: redraw the whole block in place ──
+  const clip = (s: string, n: number): string => s.length > n ? `${s.slice(0, Math.max(1, n - 1))}…` : s;
   function render(): void {
     const W = innerW(), lay = layout(W), [cr, cx] = cursorRC(lay);
+    const cols = err.columns || 80;
     if (cr < top) top = cr;
     if (cr >= top + ROWS) top = cr - ROWS + 1;
     top = Math.max(0, Math.min(top, Math.max(0, lay.length - ROWS)));
@@ -300,51 +381,54 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     const n = text().length;
     const info = n ? ` ${lay.length > ROWS ? `row ${cr + 1}/${lay.length} · ` : ''}${n.toLocaleString('en-US')} chars${truncated ? ` · TRUNCATED at ${maxLen.toLocaleString('en-US')}` : ''} ` : '';
     out.push(`${ORANGE}╰${'─'.repeat(Math.max(0, W - info.length))}${RESET}${DIM}${info}${RESET}${ORANGE}──╯${RESET}`);
-    if (choiceRows.length) {
-      const headerW = Math.max(...choiceRows.map(r => r.header.length), effortCfg?.header.length ?? 0);
-      const colW = Array.from({ length: Math.max(...choiceRows.map(r => r.options.length)) }, (_, col) =>
-        Math.max(...choiceRows.map(r => r.options[col]?.length ?? 0)));
-      let offset = 0;
-      for (const row of choiceRows) {
-        const opts = row.options.map((o, col) => {
-          const i = offset + col;
-          const padded = o.padEnd(colW[col]);
-          return i !== sel ? `${DIM} ${padded} ${RESET}`
-            : focus === 'model' ? `${ORANGE}${INV}${BOLD} ${padded} ${RESET}`
-              : `${ORANGE}${BOLD} ${padded} ${RESET}`;
+
+    if (flatChoices.length) {
+      // Summary: exactly what [Go] launches, always visible so a change is never a surprise.
+      const [srow] = selectedRC();
+      const eo = effortOpts(srow);
+      const effTxt = eo.length > 1 && esel[srow] > 0 ? ` · ${eo[esel[srow]]} effort` : '';
+      const model = clip(flatChoices[sel], Math.max(8, cols - 20 - effTxt.length - provName(srow).length));
+      out.push(`  ${DIM}Model:${RESET} ${ORANGE}${BOLD}${model}${RESET}${DIM}${effTxt}  (${provName(srow)})${RESET}`);
+      if (inPicker()) {
+        const title = focus === 'provider' ? 'Provider:'
+          : focus === 'pmodel' ? `${provName(pendRow)} model:`
+            : (effortCfg?.header ?? 'Effort:');
+        const { opts, hi } = pickerList();
+        // The already-committed option shows in color even when the highlight is elsewhere.
+        const cur = focus === 'provider' ? srow
+          : focus === 'pmodel' ? (pendRow === srow ? selectedRC()[1] : -1)
+            : esel[pendRow];
+        out.push(`  ${BOLD}${title}${RESET}`);
+        opts.forEach((o, i) => {
+          const num = i < 9 ? `${i + 1}:` : ' ·';
+          const name = clip(o, Math.max(8, cols - 10));
+          out.push(i === hi
+            ? `   ${num} ${ORANGE}${INV}${BOLD} ${name} ${RESET}`
+            : `   ${DIM}${num}${RESET} ${i === cur ? `${ORANGE} ${name} ${RESET}` : `${DIM} ${name} ${RESET}`}`);
         });
-        out.push(`  ${focus === 'model' ? BOLD : DIM}${row.header.padEnd(headerW)}${RESET} ${opts.join(' ')}${focus === 'model' && offset <= sel && sel < offset + row.options.length ? `  ${DIM}←/→ · ↑/↓ · Enter${RESET}` : ''}`);
-        offset += row.options.length;
-      }
-      if (effortCfg) {
-        // Options belong to the agent row the main selection sits on; column widths
-        // span every row's variants so switching agents never shifts the layout.
-        const [crow] = selectedRC();
-        const eopts = effortCfg.perRow[crow]?.options ?? [];
-        const ecolW = Array.from({ length: Math.max(0, ...effortCfg.perRow.map(p => p.options.length)) }, (_, col) =>
-          Math.max(0, ...effortCfg.perRow.map(p => p.options[col]?.length ?? 0)));
-        const opts = eopts.map((o, col) => {
-          const padded = o.padEnd(ecolW[col]);
-          return col !== esel[crow] ? `${DIM} ${padded} ${RESET}`
-            : focus === 'effort' ? `${ORANGE}${INV}${BOLD} ${padded} ${RESET}`
-              : `${ORANGE}${BOLD} ${padded} ${RESET}`;
-        });
-        out.push(`  ${focus === 'effort' ? BOLD : DIM}${effortCfg.header.padEnd(headerW)}${RESET} ${opts.join(' ')}${focus === 'effort' ? `  ${DIM}←/→ · Enter${RESET}` : ''}`);
       }
     }
-    const btn = (label: string, focused: boolean): string =>
-      focused ? `${ORANGE}${INV}${BOLD} ${label} ${RESET}` : `${DIM}[${RESET} ${label} ${DIM}]${RESET}`;
-    out.push(`  ${btn('Go', focus === 'go')}  ${btn('Cancel', focus === 'cancel')}`);
-    out.push(`${DIM}Tab: move · Enter: newline · Ctrl+Z: undo · Ctrl+D: Go · Ctrl+C: cancel${RESET}`);
+    if (!inPicker()) {
+      const btn = (label: string, focused: boolean): string =>
+        focused ? `${ORANGE}${INV}${BOLD} ${label} ${RESET}` : `${DIM}[${RESET} ${label} ${DIM}]${RESET}`;
+      out.push(`  ${btn('Go', focus === 'go')}  ${btn('Cancel', focus === 'cancel')}${flatChoices.length ? `  ${btn('Change model', focus === 'change')}` : ''}`);
+    }
+    out.push(inPicker()
+      ? `${DIM}1-9: pick · ↑/↓ · Enter: choose · Esc: back · Ctrl+C: cancel${RESET}`
+      : `${DIM}Tab: move · Enter: newline · Ctrl+Z: undo · Ctrl+D: Go · Ctrl+C: cancel${RESET}`);
 
-    w(`${drawn ? `${ESC}[${BLOCK_H}A` : ''}${out.map((l) => `\r${ESC}[2K${l}`).join('\n')}\n`);
+    // Climb over what the PREVIOUS render drew (the block height varies with the
+    // picker state), clear it, draw the new block.
+    w(`${drawn ? `${ESC}[${drawnH}A` : ''}\r${ESC}[0J${out.map((l) => `\r${l}`).join('\n')}\n`);
+    drawnH = out.length;
     drawn = true;
   }
 
   // ── input: parse one ESC sequence from the head of buf ──
   // Returns null while the sequence is still incomplete (wait for more bytes);
   // key '' means "recognized and swallowed" (runaway sequences). An ESC followed by a
-  // plain char is an Alt-chord and comes back as key "\x1b<char>".
+  // plain char is an Alt-chord and comes back as key "\x1b<char>". A lone ESC byte
+  // that nothing follows is the Esc key itself, resolved by a short timer in onData.
   function parseEsc(buf: string): { consume: number; key: string } | null {
     if (buf.length < 2) return null;
     const c1 = buf[1];
@@ -359,35 +443,12 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     return null;
   }
 
-  const cycle: Focus[] = flatChoices.length
-    ? (effortCfg ? ['edit', 'model', 'effort', 'go', 'cancel'] : ['edit', 'model', 'go', 'cancel'])
-    : ['edit', 'go', 'cancel'];
+  const cycle: Focus[] = flatChoices.length ? ['edit', 'go', 'cancel', 'change'] : ['edit', 'go', 'cancel'];
   const step = (d: number): void => { focus = cycle[(cycle.indexOf(focus) + d + cycle.length) % cycle.length]; };
-  const selectedRC = (): [number, number] => {
-    let offset = 0;
-    for (let row = 0; row < choiceRows.length; row++) {
-      if (sel < offset + choiceRows[row].options.length) return [row, sel - offset];
-      offset += choiceRows[row].options.length;
-    }
-    return [0, 0];
-  };
-  const rowOffset = (row: number): number => choiceRows.slice(0, row).reduce((n, r) => n + r.options.length, 0);
-  const pick = (d: number): void => {
-    if (!flatChoices.length) return;
-    const [row, col] = selectedRC(), n = choiceRows[row].options.length;
-    sel = rowOffset(row) + (col + d + n) % n;
-  };
-  const pickRow = (d: number): void => {
-    if (choiceRows.length < 2) return;
-    const [row, col] = selectedRC();
-    const next = (row + d + choiceRows.length) % choiceRows.length;
-    sel = rowOffset(next) + Math.min(col, choiceRows[next].options.length - 1);
-  };
-  const pickEffort = (d: number): void => {
-    if (!effortCfg) return;
-    const [row] = selectedRC();
-    const n = effortCfg.perRow[row]?.options.length ?? 0;
-    if (n) esel[row] = (esel[row] + d + n) % n;
+  const buttons: Focus[] = flatChoices.length ? ['go', 'cancel', 'change'] : ['go', 'cancel'];
+  const btnMove = (d: number): void => {
+    const i = buttons.indexOf(focus);
+    if (i >= 0) focus = buttons[Math.max(0, Math.min(buttons.length - 1, i + d))];
   };
 
   return new Promise<PromptBoxResult | null>((resolve) => {
@@ -397,9 +458,11 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
       try { stdin.setRawMode(false); } catch { /* already closed */ }
       w(`${ESC}[?2004l${ESC}[?25h`);
     };
+    let escTimer: ReturnType<typeof setTimeout> | null = null;
     const finish = (result: PromptBoxResult | null): void => {
       if (done) return;
       done = true;
+      if (escTimer) { clearTimeout(escTimer); escTimer = null; }
       stdin.removeListener('data', onData);
       err.removeListener('resize', onResize);
       process.removeListener('exit', restore);
@@ -409,7 +472,7 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
     };
     const submit = (): void => {
       const [row] = selectedRC();
-      const eopts = effortCfg?.perRow[row]?.options ?? [];
+      const eopts = effortOpts(row);
       finish({
         text: text().slice(0, maxLen).trim(),
         choice: flatChoices.length ? flatChoices[sel] : null,
@@ -437,7 +500,7 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         switch (k.slice(1, -1).split(';')[0]) {
           case '1': case '7': if (focus === 'edit') { if (jump) docHome(); else rowHome(); } return;
           case '4': case '8': if (focus === 'edit') { if (jump) docEnd(); else rowEnd(); } return;
-          case '3': focus = 'edit'; mark('del'); del(); return;
+          case '3': if (inPicker()) return; focus = 'edit'; mark('del'); del(); return;
           case '5': if (focus === 'edit') moveVert(-ROWS); return;
           case '6': if (focus === 'edit') moveVert(ROWS); return;
           case '200': paste = true; return;
@@ -445,21 +508,19 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         }
       }
       switch (k[k.length - 1]) {
-        case 'A': if (focus === 'edit') moveVert(-1); else if (focus === 'model') pickRow(-1); else step(-1); return; // ↑
-        case 'B': if (focus === 'edit') moveVert(1); else if (focus === 'model') pickRow(1); else step(1); return;   // ↓
+        case 'A': if (focus === 'edit') moveVert(-1); else if (inPicker()) pickerMove(-1); else step(-1); return; // ↑
+        case 'B': if (focus === 'edit') moveVert(1); else if (inPicker()) pickerMove(1); else step(1); return;   // ↓
         case 'C': if (focus === 'edit') { if (jump) wordRight(); else moveRight(); }             // →
-          else if (focus === 'model') pick(1);
-          else if (focus === 'effort') pickEffort(1);
-          else focus = 'cancel';
+          else if (inPicker()) pickerConfirm();
+          else btnMove(1);
           return;
         case 'D': if (focus === 'edit') { if (jump) wordLeft(); else moveLeft(); }               // ←
-          else if (focus === 'model') pick(-1);
-          else if (focus === 'effort') pickEffort(-1);
-          else focus = 'go';
+          else if (inPicker()) pickerBack();
+          else btnMove(-1);
           return;
         case 'H': if (focus === 'edit') { if (jump) docHome(); else rowHome(); } return;
         case 'F': if (focus === 'edit') { if (jump) docEnd(); else rowEnd(); } return;
-        case 'Z': step(-1); return;                                                              // Shift+Tab
+        case 'Z': if (inPicker()) pickerBack(); else step(-1); return;                           // Shift+Tab
         default: return;
       }
     }
@@ -468,38 +529,25 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
       const code = ch.codePointAt(0)!;
       if (code === 3) return finish(null);                              // Ctrl+C
       if (code === 4) return submit();                                  // Ctrl+D
-      if (code === 9) { step(1); return; }                              // Tab
+      if (code === 9) { if (inPicker()) pickerConfirm(); else step(1); return; } // Tab
       if (code === 13 || code === 10) {                                 // Enter
         if (focus === 'go') return submit();
         if (focus === 'cancel') return finish(null);
-        if (focus === 'model') { focus = effortCfg ? 'effort' : 'go'; return; } // picked — step onward
-        if (focus === 'effort') { focus = 'go'; return; }               // picked — step to [Go]
+        if (focus === 'change') { openPicker(); return; }
+        if (inPicker()) { pickerConfirm(); return; }
         // Lone "." just typed = finish (compat with the pre-box reader).
         if (lines[cl] === '.' && cc === 1) { lines.splice(cl, 1); if (!lines.length) lines = ['']; cl = Math.max(0, cl - 1); cc = lines[cl].length; return submit(); }
         mark('nl'); insertText('\n'); return;
       }
-      if (focus === 'model') {                                          // choose without leaving the row
-        const opts = flatChoices;
-        if (ch >= '1' && ch <= '9') { const i = code - 49; if (i < opts.length) sel = i; return; }
+      if (inPicker()) {                                                 // list shortcuts only, never the editor
+        if (code === 127 || code === 8) { pickerBack(); return; }       // Backspace = back
+        const { opts, hi, choose } = pickerList();
+        if (ch >= '1' && ch <= '9') { const i = code - 49; if (i < opts.length) choose(i); return; } // single keystroke
         const c = ch.toLowerCase();
-        if (c >= 'a' && c <= 'z') { // jump to the NEXT option with this initial (cycling)
+        if (c >= 'a' && c <= 'z') { // jump the highlight to the NEXT option with this initial (cycling)
           for (let d = 1; d <= opts.length; d++) {
-            const i = (sel + d) % opts.length;
-            if (opts[i].toLowerCase().startsWith(c)) { sel = i; return; }
-          }
-        }
-        return;
-      }
-      if (focus === 'effort') {                                         // same shortcuts, scoped to the row
-        const [row] = selectedRC();
-        const opts = effortCfg?.perRow[row]?.options ?? [];
-        if (!opts.length) return;
-        if (ch >= '1' && ch <= '9') { const i = code - 49; if (i < opts.length) esel[row] = i; return; }
-        const c = ch.toLowerCase();
-        if (c >= 'a' && c <= 'z') {
-          for (let d = 1; d <= opts.length; d++) {
-            const i = (esel[row] + d) % opts.length;
-            if (opts[i].toLowerCase().startsWith(c)) { esel[row] = i; return; }
+            const i = (hi + d) % opts.length;
+            if (opts[i].toLowerCase().startsWith(c)) { pickerMove(i - hi); return; }
           }
         }
         return;
@@ -513,10 +561,11 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
       if (code === 5) { rowEnd(); return; }                             // Ctrl+E
       if (code === 11) { mark('kill'); lines[cl] = lines[cl].slice(0, cc); return; }  // Ctrl+K
       if (code === 21) { mark('kill'); lines[cl] = lines[cl].slice(cc); cc = 0; return; } // Ctrl+U
-      if (code === 9 || code >= 32) { mark('ins'); insertText(ch); }
+      if (code >= 32) { mark('ins'); insertText(ch); }
     }
 
     const onData = (chunk: string): void => {
+      if (escTimer) { clearTimeout(escTimer); escTimer = null; }
       pend += chunk;
       while (pend && !done) {
         if (paste) {
@@ -542,13 +591,23 @@ export function promptBox(opts: PromptBoxOptions = {}): Promise<PromptBoxResult 
         const ch = pend[0]; pend = pend.slice(1);
         plain(ch);
       }
+      // A lone ESC byte could be the head of a sequence still in flight, or the Esc
+      // key. If nothing follows it shortly, it was Esc: step the picker back a level.
+      if (!done && !paste && pend === ESC) {
+        escTimer = setTimeout(() => {
+          escTimer = null;
+          if (done || pend !== ESC) return;
+          pend = '';
+          if (pickerBack()) render();
+        }, ESC_LONE_MS);
+      }
       // No redraw while a paste is still streaming in: rendering per chunk floods
       // the pty's output side while its input side is saturated, which can wedge
       // the whole terminal on a very large paste. One render when the end marker
       // lands shows the final state (and is faster anyway).
       if (!done && !paste) render();
     };
-    const onResize = (): void => { if (drawn) { w(`${ESC}[${BLOCK_H}A\r${ESC}[0J`); drawn = false; } render(); };
+    const onResize = (): void => { if (drawn) { w(`${ESC}[${drawnH}A\r${ESC}[0J`); drawn = false; } render(); };
 
     process.once('exit', restore);
     stdin.setRawMode(true);
