@@ -6,7 +6,7 @@ Finish this `gw` session. Land every repo you changed **with a real, descriptive
 **Step 1 — see exactly what will land (read-only).** Run:
 
 ```bash
-GW_ROOT="__GW_ROOT__" __GW_TSX__ "__GW_TS__" done --show --in-claude $ARGUMENTS
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" done --show --in-claude $ARGUMENTS
 ```
 
 This prints, per changed repo, the net diff (committed work plus uncommitted edits) **this session authored** — measured against the merge base, so it is only ever your own work. It stages, gates, and merges **nothing**. If it reports `no changes to land`, stop — there's nothing to finish.
@@ -21,13 +21,13 @@ Everything in that diff is yours. If it shows a file you don't recognize being d
 **Step 3 — land it, passing your message** via a heredoc (the quoted `'EOF'` keeps backticks/`$` in the body literal):
 
 ```bash
-GW_ROOT="__GW_ROOT__" __GW_TSX__ "__GW_TS__" done --in-claude -m "$(cat <<'EOF'
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" done --in-claude -m "$(cat <<'EOF'
 <subject line>
 
 - <body bullet>
 - <body bullet>
 EOF
-)" $ARGUMENTS; rc=$?; pwd -P >/dev/null 2>&1 || cd "__GW_ROOT__"; (exit $rc)
+)" $ARGUMENTS; rc=$?; pwd -P >/dev/null 2>&1 || cd "${PWD%%/.worktrees/*}"; (exit $rc)
 ```
 
 The trailing `pwd -P … || cd …; (exit $rc)` matters: a successful land **deletes this worktree**, which is your shell's current directory. Without it your next command fails with `getcwd: cannot access parent directories` — which reads like the land failed even though it succeeded. It **must** be `pwd -P` (a real `getcwd` syscall), not plain `pwd`: the `pwd` builtin just echoes the stale `$PWD` and returns 0 even after the directory is gone, so `|| cd` would never fire and the shell would stay stranded (that stray non-zero exit is exactly this bug). `pwd -P` lands you back at the workspace root while preserving gw's real exit code. Judge success by the printed `merged + pushed: …` line, not just the exit code.

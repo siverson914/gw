@@ -4,7 +4,7 @@ description: Finish this gw worktree FAST — skip the gate (tests + doc-drift c
 Finish the current `gw` worktree **without running the pre-merge gate** — for small edits you know don't need testing. This skips both the per-repo test gate (`just test-fast`) and the generated-doc drift check.
 
 ```bash
-GW_ROOT="__GW_ROOT__" __GW_TSX__ "__GW_TS__" done --in-claude --no-check $ARGUMENTS; rc=$?; pwd -P >/dev/null 2>&1 || cd "__GW_ROOT__"; (exit $rc)
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" done --in-claude --no-check $ARGUMENTS; rc=$?; pwd -P >/dev/null 2>&1 || cd "${PWD%%/.worktrees/*}"; (exit $rc)
 ```
 
 It commits any pending work, squash-merges the branch into the base branch, and pushes — no gate.

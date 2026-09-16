@@ -813,13 +813,18 @@ function sourceLine(): string { return `source ${path.join(GW_HOME, 'gw.sh')}`; 
 // paired with an `export GW_HOME=` set to this checkout — the setup gw.sh itself
 // now prefers, since GW_HOME survives a shell-snapshot re-source that breaks
 // self-location (see the GW_HOME guard in gw.sh).
+// Shared rc files plus the per-machine ones dotfiles setups source from them
+// (a dotfiles-managed ~/.zshrc usually ends with `source ~/.zshrc.local`).
+const RC_FILES = ['.bashrc', '.zshrc', '.bash_profile', '.profile', '.zprofile', '.zshenv',
+  '.zshrc.local', '.bashrc.local', '.shell_local'];
+
 function rcFilesSourcing(): string[] {
   const marker = path.join(GW_HOME, 'gw.sh');
   const escaped = GW_HOME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const varSource = /source\s+"?\$\{?GW_HOME\}?\/gw\.sh"?/;
   const varExport = new RegExp(`export\\s+GW_HOME=["']?${escaped}["']?`);
   const out: string[] = [];
-  for (const name of ['.bashrc', '.zshrc', '.bash_profile', '.profile']) {
+  for (const name of RC_FILES) {
     const p = path.join(os.homedir(), name);
     try {
       const content = fs.readFileSync(p, 'utf-8');
@@ -829,9 +834,16 @@ function rcFilesSourcing(): string[] {
   return out;
 }
 
-// Best-guess rc for the user's login shell; overridable with --rc.
+// Best-guess rc for the user's login shell; overridable with --rc. gw.sh's path is
+// machine-specific, so when the main rc is a symlink (a shared dotfiles repo) and a
+// per-machine `<rc>.local` exists, write there instead of into the shared file.
 function defaultRc(): string {
-  return path.join(os.homedir(), (process.env.SHELL || '').includes('zsh') ? '.zshrc' : '.bashrc');
+  const main = path.join(os.homedir(), (process.env.SHELL || '').includes('zsh') ? '.zshrc' : '.bashrc');
+  const local = `${main}.local`;
+  try {
+    if (fs.lstatSync(main).isSymbolicLink() && fs.existsSync(local)) return local;
+  } catch { /* main rc absent */ }
+  return main;
 }
 
 // `gw install` — wire `gw` into the shell rc, idempotently. This is the ONE step a
@@ -917,8 +929,10 @@ async function cmdSetup(): Promise<void> {
   const dstDir = path.join(os.homedir(), '.claude', 'commands');
   const skillRoots = AGENT_TABLE.filter((a) => a.skillsRoot).map((a) => a.skillsRoot!());
   fs.mkdirSync(dstDir, { recursive: true });
-  // Bake absolute paths into the installed slash commands so /done works from ANY
-  // repo's worktree (which has no gw checkout of its own — it must call gw by path).
+  // Bake this machine's gw paths into the installed slash commands so /done works from
+  // ANY repo's worktree (which has no gw checkout of its own — it must call gw by path).
+  // The workspace is NOT baked in: the commands unset GW_ROOT and let gw discover the
+  // workspace from the worktree they run in, so one install serves every workspace.
   const gwTs = fileURLToPath(import.meta.url);
   for (const f of ['done.md', 'df.md', 'abort.md', 'donedone.md']) {
     const src = path.join(srcDir, f);

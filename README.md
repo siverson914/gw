@@ -28,7 +28,7 @@ npm run gw install                              # appends `source <this-clone>/g
 exec $SHELL                                     # reload — then `gw doctor` to verify
 ```
 
-`gw install` writes the **absolute path of this clone** into your `~/.bashrc` or `~/.zshrc` (idempotent; `--rc <file>` to target one, `--print` to just show the line). `gw doctor` checks tools + shell wiring and tells you what's missing.
+`gw install` writes the **absolute path of this clone** into your `~/.bashrc` or `~/.zshrc` (idempotent; `--rc <file>` to target one, `--print` to just show the line). If that rc is a symlink from a shared dotfiles repo and a per-machine `~/.zshrc.local` / `~/.bashrc.local` exists, it writes there instead, so the machine-specific path never lands in shared dotfiles. `gw doctor` checks tools + shell wiring and tells you what's missing.
 
 Point it at the directory that holds your repos as siblings:
 
@@ -109,7 +109,7 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | `gw ready` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
 | `gw abort [WT-id] [--yes]` | Discard a session's branch work in every repo. Base branches are never touched. Agent wrappers use `--in-agent`, which refuses to discard unlanded work unless `--yes` is passed, so an agent can never silently destroy real work. |
 | `gw prune [--older-than 2d] [--dry-run]` | Remove fully-landed, idle sessions. |
-| `gw setup` | (Re)install Claude commands and Codex skills, then sanity-check tools/repos. |
+| `gw setup` | (Re)install Claude commands and Codex skills, then sanity-check tools/repos. Run once per machine: the commands find the workspace from the worktree they run in, so one install serves every gw workspace on that machine. |
 | `/done` or `$gw-done` | Agent-facing wrappers around the same `gw done` engine. Claude also gets `/abort` and `/donedone`; Codex gets `$gw-abort` and `$gw-donedone`. |
 
 Legacy `WS-` session ids created before the `WT-` rename are still resolvable and landable.

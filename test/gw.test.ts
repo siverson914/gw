@@ -14,6 +14,7 @@ import { test, after } from 'node:test';
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { makeFixture, gw, git, startSession, cleanupFixtures } from './fixture.js';
 import { parseId, slugify } from '../src/lib/worktrees.js';
 
@@ -32,6 +33,22 @@ test('parseId accepts WT- and legacy WS- ids, rejects noise', () => {
 test('slugify drops filler words and truncates at word boundaries', () => {
   assert.equal(slugify('I want to add the new dashboard page'), 'add-new-dashboard-page');
   assert.equal(slugify(''), '');
+});
+
+test('slash-command templates never bake a workspace path (one install serves every workspace)', () => {
+  const dir = path.join(import.meta.dirname, '..', 'commands');
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.md'))) {
+    const body = fs.readFileSync(path.join(dir, f), 'utf-8');
+    assert.ok(!body.includes('__GW_ROOT__'), `${f} bakes the workspace root`);
+    for (const line of body.split('\n').filter((l) => l.includes('__GW_TS__'))) {
+      assert.match(line, /env -u GW_ROOT /, `${f}: gw must discover the workspace, not inherit GW_ROOT`);
+    }
+  }
+});
+
+test('post-land fallback cd resolves the workspace root from a worktree path', () => {
+  const out = execFileSync('bash', ['-c', 'PWD=/home/me/work/Acme/.worktrees/WT-007-x/server; echo "${PWD%%/.worktrees/*}"']).toString().trim();
+  assert.equal(out, '/home/me/work/Acme');
 });
 
 // ── session lifecycle ────────────────────────────────────────────────────────

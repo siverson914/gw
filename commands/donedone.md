@@ -4,7 +4,7 @@ description: Done-done check — verify every gw session has landed, fast-forwar
 Check whether ALL `gw` work is done-done — every session landed, every canonical checkout synced — so a deploy would ship exactly what's on `origin/<base>`. Run this:
 
 ```bash
-GW_ROOT="__GW_ROOT__" __GW_TSX__ "__GW_TS__" ready
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" ready
 ```
 
 **Run it directly — do NOT pipe through `grep`/`head`/`tail`.** The verdict is the last lines.
