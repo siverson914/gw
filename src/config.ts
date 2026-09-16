@@ -110,8 +110,8 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     launcher: DEFAULT_LAUNCHER,
     resumeLauncher: `${DEFAULT_LAUNCHER} --continue`,
     // Full model ids (not bare aliases) so a session's launch line always shows
-    // the exact version being run: Fable 5, Opus 5, Sonnet 5, Haiku 4.5.
-    models: ['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    // the exact version being run: Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5.
+    models: ['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
     defaultModel: 'claude-sonnet-5',
     modelFlag: '--model',
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], // `claude --help`: --effort choices
@@ -129,7 +129,7 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     // under `-a never` those writes fail silently back to the model instead of prompting.
     launcher: 'codex --ask-for-approval never --sandbox danger-full-access',
     resumeLauncher: 'codex resume --last --ask-for-approval never --sandbox danger-full-access',
-    models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
+    models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
     defaultModel: 'gpt-5.6-terra',
     modelFlag: '--model',
     // Union across the served models (~/.codex/models_cache.json); max/ultra exist
@@ -141,11 +141,11 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
   grok: {
     launcher: 'grok --permission-mode auto',
     resumeLauncher: 'grok --permission-mode auto --continue',
-    models: ['grok-4.5'], // `grok models` — the CLI proxy serves this list per login
-    defaultModel: 'grok-4.5',
+    models: ['grok-4.6', 'grok-4.5'], // `grok models` — the CLI proxy serves this list per login
+    defaultModel: 'grok-4.6',
     modelFlag: '--model',
-    efforts: ['low', 'medium', 'high'], // ~/.grok/models_cache.json reasoning_efforts
-    defaultEffort: null, // the CLI's own default for grok-4.5 is high
+    efforts: ['low', 'medium', 'high', 'xhigh'], // ~/.grok/models_cache.json reasoning_efforts; xhigh is grok-4.6 only
+    defaultEffort: null, // the CLI's own default for grok-4.6 is high
     effortFlag: '--reasoning-effort',
   },
   agy: {
