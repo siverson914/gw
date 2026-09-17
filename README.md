@@ -110,7 +110,7 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | `gw ready [--json]` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
 | `gw abort [WT-id] [--yes]` | Discard a session's branch work in every repo. Base branches are never touched. Agent wrappers use `--in-agent`, which refuses to discard unlanded work unless `--yes` is passed, so an agent can never silently destroy real work. |
 | `gw prune [--older-than 2d] [--dry-run]` | Remove fully-landed, idle sessions. |
-| `gw setup` | (Re)install Claude commands and Codex skills, then sanity-check tools/repos. Run once per machine: the commands find the workspace from the worktree they run in, so one install serves every gw workspace on that machine. |
+| `gw setup` | (Re)install Claude commands and Codex skills, refresh the gw guidance block in the workspace's `CLAUDE.md`/`AGENTS.md`, then sanity-check tools/repos. Run once per machine: the commands find the workspace from the worktree they run in, so one install serves every gw workspace on that machine. |
 | `/done` or `$gw-done` | Agent-facing wrappers around the same `gw done` engine. Claude also gets `/abort`, `/donedone`, and `/gw-sessions`; Codex gets `$gw-abort`, `$gw-donedone`, and `$gw-sessions`. |
 
 Legacy `WS-` session ids created before the `WT-` rename are still resolvable and landable.
@@ -160,6 +160,8 @@ gw done WT-012-retry-fix --in-agent -m "fix(api): …"             # land by id,
 gw abort WT-013 --in-agent                                       # refuses unlanded work without --yes
 gw ready --json                                                  # {"ready": true, …}, exit 0 = safe to deploy
 ```
+
+Agents learn this without being told: `gw init`/`gw setup` keep a short **gw guidance block** in the workspace root's `CLAUDE.md` and `AGENTS.md`, from [`templates/workspace-agents.md`](templates/workspace-agents.md). It explains what a session is, the "canonical checkouts are read-only" rule, and which of `/done`, `/abort`, `/gw-sessions`, `/donedone` to use when. The block sits between `<!-- gw:begin -->` / `<!-- gw:end -->` markers. Re-running `gw setup` refreshes it and leaves the rest of the file alone. Agents working on gw itself should read [`AGENTS.md`](AGENTS.md).
 
 The installed command calls `src/gw.ts` by path rather than the `gw` shell function. `--prompt`/`--name` always create a **new** session, even from inside a worktree. `--json` output goes to stdout alone, and logs go to stderr.
 

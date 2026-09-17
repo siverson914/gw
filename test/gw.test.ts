@@ -445,3 +445,31 @@ test('gw.sh: a non-TTY start never moves the caller shell, and GW_HOME is export
   assert.equal(out.match(/PWD=(.*)/)![1], fs.realpathSync(fx.root));
   assert.ok(fs.existsSync(fx.wt('WT-001-shell', 'a')), 'the session was still created');
 });
+
+test('setup maintains ONE gw guidance block in the workspace CLAUDE.md/AGENTS.md without touching the rest', async () => {
+  const fx = makeFixture();
+  const home = fs.mkdtempSync(path.join(fx.root, 'home-'));
+  fs.writeFileSync(path.join(fx.root, 'CLAUDE.md'), '# My project\n\nHand-written notes.\n');
+
+  const first = await gw(fx, ['setup'], { env: { HOME: home, CODEX_HOME: path.join(home, '.codex') } });
+  assert.equal(first.code, 0, first.stderr);
+  const claude = fs.readFileSync(path.join(fx.root, 'CLAUDE.md'), 'utf8');
+  assert.ok(claude.startsWith('# My project\n\nHand-written notes.\n'), 'existing content kept');
+  assert.match(claude, /<!-- gw:begin[^\n]*-->\n## gw \(Grove Workspace\)/);
+  assert.match(claude, /canonical checkouts \(`a\/`, `b\/`\) are READ-ONLY/);
+  assert.match(claude, /\/gw-sessions/);
+  const agents = fs.readFileSync(path.join(fx.root, 'AGENTS.md'), 'utf8');
+  assert.ok(agents.startsWith('<!-- gw:begin'), 'AGENTS.md created with just the block');
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'commands', 'gw-sessions.md')));
+
+  // Edit inside the block is replaced; a second run is idempotent (one block, same bytes).
+  fs.writeFileSync(path.join(fx.root, 'CLAUDE.md'), claude.replace('Rule #1', 'STALE') + '\nTrailing notes.\n');
+  const second = await gw(fx, ['setup'], { env: { HOME: home, CODEX_HOME: path.join(home, '.codex') } });
+  assert.equal(second.code, 0, second.stderr);
+  const after2 = fs.readFileSync(path.join(fx.root, 'CLAUDE.md'), 'utf8');
+  assert.equal(after2.match(/gw:begin/g)!.length, 1);
+  assert.ok(!after2.includes('STALE') && after2.includes('Rule #1'));
+  assert.ok(after2.endsWith('\nTrailing notes.\n'), 'content after the block kept');
+  await gw(fx, ['setup'], { env: { HOME: home, CODEX_HOME: path.join(home, '.codex') } });
+  assert.equal(fs.readFileSync(path.join(fx.root, 'CLAUDE.md'), 'utf8'), after2);
+});

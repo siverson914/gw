@@ -44,7 +44,8 @@
  *                       to deploy.
  *   gw prune            remove fully-landed, idle sessions (nothing a /done would land).
  *                       --older-than <dur>, --dry-run, --yes.
- *   gw setup            (re)install Claude commands + Codex skills and check tools/repos.
+ *   gw setup            (re)install Claude commands + Codex skills, refresh the gw guidance
+ *                       block in the workspace's CLAUDE.md/AGENTS.md, and check tools/repos.
  *
  * Config (gw.config.json at the workspace root) defines the repos, per-repo gates,
  * base branch, launcher, namer, brand color, and optional session gate / warn dirs.
@@ -964,6 +965,36 @@ function tsxCmd(): string {
   return fs.existsSync(tsxBin) ? `"${tsxBin}"` : 'npx --yes tsx';
 }
 
+// The agent-guidance block gw keeps in a workspace's CLAUDE.md (Claude) and AGENTS.md
+// (Codex and others), between markers so re-running setup refreshes it in place and never
+// touches the rest of the file. The workspace root is not a git repo, so this is the
+// only thing that gets this guidance to agents started there.
+const BLOCK_BEGIN = '<!-- gw:begin (managed by `gw setup` — edits inside are overwritten) -->';
+const BLOCK_END = '<!-- gw:end -->';
+function upsertAgentBlock(file: string, block: string): 'created' | 'updated' | 'unchanged' {
+  const wrapped = `${BLOCK_BEGIN}\n${block.trimEnd()}\n${BLOCK_END}\n`;
+  let cur: string | null = null;
+  try { cur = fs.readFileSync(file, 'utf-8'); } catch { /* absent */ }
+  if (cur === null) { fs.writeFileSync(file, wrapped); return 'created'; }
+  const start = cur.indexOf('<!-- gw:begin'), end = cur.indexOf(BLOCK_END);
+  const next = start >= 0 && end > start
+    ? cur.slice(0, start) + wrapped + cur.slice(end + BLOCK_END.length).replace(/^\n/, '')
+    : `${cur.trimEnd()}\n\n${wrapped}`;
+  if (next === cur) return 'unchanged';
+  fs.writeFileSync(file, next);
+  return 'updated';
+}
+function installAgentGuidance(): void {
+  const tpl = path.join(GW_HOME, 'templates', 'workspace-agents.md');
+  if (!fs.existsSync(tpl)) { log(`MISSING template ${tpl}`); return; }
+  const repos = REPO_KEYS.map((k) => `\`${path.relative(REPO_ROOT, REPOS[k].dir) || k}/\``).join(', ');
+  const block = fs.readFileSync(tpl, 'utf-8').replaceAll('{{REPOS}}', repos);
+  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+    const r = upsertAgentBlock(path.join(REPO_ROOT, name), block);
+    log(`${r} gw agent guidance in ${path.join(REPO_ROOT, name)}`);
+  }
+}
+
 async function cmdSetup(): Promise<void> {
   const srcDir = path.join(GW_HOME, 'commands');
   const dstDir = path.join(os.homedir(), '.claude', 'commands');
@@ -997,6 +1028,7 @@ async function cmdSetup(): Promise<void> {
       log(`installed $${skillName} -> ${path.join(skillDir, 'SKILL.md')}`);
     }
   }
+  installAgentGuidance();
   for (const k of REPO_KEYS) log(`${fs.existsSync(path.join(REPOS[k].dir, '.git')) ? 'ok' : '!!'}  ${k} repo at ${REPOS[k].dir}`);
   for (const bin of ['git', 'gh', ...AGENT_TABLE.map((a) => a.binary), 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
   log(rcFilesSourcing().length ? `shell: gw.sh already sourced (gw doctor to verify).` : `enable the gw command:  gw install   (adds '${sourceLine()}' to your shell rc)`);
@@ -1430,7 +1462,8 @@ const HELP = `gw — Grove Workspace
   gw status [--json]                          cross-repo + worktree status
   gw ready [--json]                           done-done check (safe to deploy?)
   gw prune [--older-than 2d] [--dry-run]      remove landed, idle sessions
-  gw setup                                    (re)install Claude commands + Codex skills
+  gw setup                                    (re)install Claude commands + Codex skills,
+                                              refresh gw guidance in CLAUDE.md/AGENTS.md
 
 Config: ${CONFIG_NAME} at the workspace root (GW_ROOT overrides discovery).`;
 
