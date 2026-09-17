@@ -105,12 +105,13 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | `gw start [WT-id] [--no-continue] [--new]` | Branch every repo, open the prompt box with **Run with** rows (agent + model) and an **Effort** row (reasoning effort for the selected agent; `default` = provider default), and launch the selection. The choice is saved with the session, so resume uses the same agent, model, and effort. `--agent`/`--model`/`--effort` are available for scripts. |
 | `gw done [--pr] [--no-check] [--quick\|--full] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. `--quick` runs each repo's lighter, diff-scoped `gateQuick` (falling back to the full `gate`, so never *less* safe); `--full` forces the full gate even where a repo sets `gateQuickDefault`. Without `-m`, the message is composed from the branch's own commits (the `/done` skill writes a richer one). |
 | `gw done --show` | Read-only: print the net per-repo diff that would land (the session's own work, vs the merge base with `origin/<base>` — never other people's newer commits, inverted), staging/gating/merging nothing. Used by `/done` to compose the commit message before landing. |
-| `gw status` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. |
-| `gw ready` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
+| `gw start --prompt "…" --name slug --json` | Scripted start for agents: no prompt box, no namer, no `cd`, no launch — prints `{id, dir, branch, repos[], agent, …}`. `--no-launch` alone prints just the dir. See [Driving gw from an agent](#driving-gw-from-an-agent). |
+| `gw status [--json]` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. `--json` adds per-session unlanded work and idle time. |
+| `gw ready [--json]` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
 | `gw abort [WT-id] [--yes]` | Discard a session's branch work in every repo. Base branches are never touched. Agent wrappers use `--in-agent`, which refuses to discard unlanded work unless `--yes` is passed, so an agent can never silently destroy real work. |
 | `gw prune [--older-than 2d] [--dry-run]` | Remove fully-landed, idle sessions. |
 | `gw setup` | (Re)install Claude commands and Codex skills, then sanity-check tools/repos. Run once per machine: the commands find the workspace from the worktree they run in, so one install serves every gw workspace on that machine. |
-| `/done` or `$gw-done` | Agent-facing wrappers around the same `gw done` engine. Claude also gets `/abort` and `/donedone`; Codex gets `$gw-abort` and `$gw-donedone`. |
+| `/done` or `$gw-done` | Agent-facing wrappers around the same `gw done` engine. Claude also gets `/abort`, `/donedone`, and `/gw-sessions`; Codex gets `$gw-abort`, `$gw-donedone`, and `$gw-sessions`. |
 
 Legacy `WS-` session ids created before the `WT-` rename are still resolvable and landable.
 
@@ -146,6 +147,23 @@ real implementation is `gw done`: it finds the current session, commits pending
 changes, integrates the latest base, runs every changed repo's gate, squash-merges
 and pushes, then removes the finished worktrees. Its behavior does not depend on
 which agent authored the changes.
+
+## Driving gw from an agent
+
+`/done` and `/abort` are for an agent working *inside* a session. An agent can also run sessions from the *outside* — start several, do or delegate the work in each, and land or discard them, all from one conversation. The `/gw-sessions` command (`$gw-sessions` for Codex) teaches the agent this flow:
+
+```bash
+gw start --prompt "fix the retry bug" --name retry-fix --json   # → {"id":"WT-012-retry-fix","dir":…,"repos":[…]}
+#   …edit files under dir by absolute path, or hand dir to a subagent…
+gw status --json                                                 # per-session unlanded work, idle time
+gw done WT-012-retry-fix --in-agent -m "fix(api): …"             # land by id, from the workspace root
+gw abort WT-013 --in-agent                                       # refuses unlanded work without --yes
+gw ready --json                                                  # {"ready": true, …}, exit 0 = safe to deploy
+```
+
+The installed command calls `src/gw.ts` by path rather than the `gw` shell function. `--prompt`/`--name` always create a **new** session, even from inside a worktree. `--json` output goes to stdout alone, and logs go to stderr.
+
+Without a terminal, the `gw` shell function never `cd`s or launches. It creates the worktrees and prints where they are, so an agent's persistent shell isn't moved into a new worktree. When sourced, `gw.sh` also exports `GW_HOME`. That keeps `gw` working in shells that rebuild functions from a snapshot, such as Claude Code's Bash tool. (`gw doctor` checks this. If it's missing, open a new shell and restart the agent.)
 
 ## How launching works (the one bit of plumbing)
 

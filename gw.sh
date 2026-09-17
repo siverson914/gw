@@ -16,6 +16,17 @@
 # GW_ROOT  = the workspace (the dir with gw.config.json). Auto-discovered by walking
 #            up from $PWD; set GW_ROOT yourself to override.
 
+# Pin GW_HOME at SOURCE time, while this file's own path is still knowable, and export
+# it. Tools that recreate the function from a dumped shell snapshot (Claude Code's Bash
+# tool does this in every fresh shell) lose the real file path — self-location inside
+# the function then points at the snapshot dir — but they inherit exported env intact.
+if [ -z "${GW_HOME:-}" ]; then
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then GW_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  elif [ -n "${ZSH_VERSION:-}" ]; then GW_HOME="$(cd "$(dirname "${(%):-%x}")" && pwd)"
+  fi
+  [ -n "${GW_HOME:-}" ] && export GW_HOME
+fi
+
 gw() {
   local home out kind dir b64 b64l rc tsx root prompt launcher word d line
 
@@ -30,6 +41,10 @@ gw() {
   elif [ -n "${BASH_SOURCE[0]:-}" ]; then home="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   elif [ -n "${(%):-%x}" ]; then home="$(cd "$(dirname "${(%):-%x}")" && pwd)"   # zsh
   else home="$(cd "$(dirname "$0")" && pwd)"; fi
+  if [ ! -f "$home/src/gw.ts" ]; then
+    printf 'gw: cannot find the gw install (looked in %s).\n    export GW_HOME=/path/to/gw in your shell rc, then open a new shell.\n' "$home" >&2
+    return 1
+  fi
 
   # GW_ROOT: explicit env wins; else walk up from $PWD looking for gw.config.json.
   if [ -n "$GW_ROOT" ]; then root="$GW_ROOT"
@@ -81,6 +96,15 @@ gw() {
       if [ -t 1 ]; then printf '\033]0;%s\007' "$(basename "$dir")"; fi
       ;;
     CD_AND_LAUNCH)
+      if [ ! -t 0 ] || [ ! -t 1 ]; then
+        # Non-interactive caller (an agent's shell, a script): launching an interactive
+        # agent here just dies, and cd'ing would silently move a persistent agent shell
+        # into the new worktree. The worktree is ready — report it and let the caller
+        # drive. (Agents: prefer `gw start --prompt … --no-launch --json`.)
+        printf 'gw: session ready at %s (no TTY - not launching agent)\n' "$dir"
+        if [ -n "$b64" ]; then printf 'gw: prompt: %s\n' "$(printf '%s' "$b64" | base64 -d)"; fi
+        return 0
+      fi
       cd "$dir" || return 1
       # Rename the terminal tab to the worktree/session name gw just picked (the
       # worktree dir's basename, e.g. WT-NNN-slug). Tabby — and any xterm/iTerm —
@@ -103,12 +127,7 @@ gw() {
 $launcher
 EOF
       fi
-      if [ ! -t 0 ] || [ ! -t 1 ]; then
-        # Non-interactive caller (an agent's shell, a script): launching an interactive
-        # agent here just dies. The worktree is ready — report it and let the caller drive.
-        printf 'gw: session ready at %s (no TTY - not launching agent)\n' "$dir"
-        if [ -n "$b64" ]; then printf 'gw: prompt: %s\n' "$(printf '%s' "$b64" | base64 -d)"; fi
-      elif [ -n "$b64" ]; then
+      if [ -n "$b64" ]; then
         prompt="$(printf '%s' "$b64" | base64 -d)"
         # `--` ends option parsing so a prompt starting with `-`/`---` (a markdown rule,
         # a diff, a flag-like first line) is taken as the positional prompt, not parsed

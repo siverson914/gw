@@ -350,3 +350,98 @@ test('ready fails while work is unlanded and passes after it lands', async () =>
   assert.equal(ready.code, 0, `${ready.stdout}\n${ready.stderr}`);
   assert.match(ready.stdout, /READY/);
 });
+
+// ── agent orchestration: scripted starts + JSON reports ──────────────────────
+
+test('start --prompt --name --json makes a session without cd/launch and prints one JSON record', async () => {
+  const fx = makeFixture();
+  const r = await gw(fx, ['start', '--prompt', 'add the widget api', '--name', 'widget api', '--json']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.directive[0], 'NONE', 'a --json start must not ask the shell to cd or launch');
+  const info = JSON.parse(r.stdout); // stdout is ONLY the record
+  assert.equal(info.id, 'WT-001-widget-api', '--name is used verbatim (slugified), no namer');
+  assert.equal(info.dir, fx.sessionDir(info.id));
+  assert.equal(info.branch, `gw/${info.id}`);
+  assert.equal(info.resumed, false);
+  assert.deepEqual(info.repos.map((x: { key: string }) => x.key), fx.repoKeys);
+  for (const repo of info.repos) {
+    assert.equal(repo.dir, fx.wt(info.id, repo.key));
+    assert.equal(git(repo.dir, ['rev-parse', '--abbrev-ref', 'HEAD']), `gw/${info.id}`);
+  }
+  assert.equal(info.agent, 'claude');
+  assert.ok(Array.isArray(info.launcher) && info.launcher[0] === 'claude');
+});
+
+test('start --no-launch prints just the session dir; a scripted start inside a worktree makes a NEW session', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const first = await gw(fx, ['start', '--prompt', 'first', '--name', 'first', '--no-launch']);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(first.directive[0], 'NONE');
+  const dir = first.stdout.trim();
+  assert.equal(dir, fx.sessionDir('WT-001-first'));
+
+  // An orchestrating agent whose shell sits inside WT-001 must not re-enter it.
+  const second = await gw(fx, ['start', '--prompt', 'second', '--name', 'second', '--json'], { cwd: fx.wt('WT-001-first', 'a') });
+  assert.equal(second.code, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).id, 'WT-002-second');
+
+  // An explicit id with --json reports the existing session instead of launching it.
+  const resumed = await gw(fx, ['start', 'WT-001', '--json']);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(resumed.directive[0], 'NONE');
+  const info = JSON.parse(resumed.stdout);
+  assert.equal(info.id, 'WT-001-first');
+  assert.equal(info.resumed, true);
+});
+
+test('status --json and ready --json report unlanded work; done by id from the root lands it', async () => {
+  const fx = makeFixture();
+  const id = JSON.parse((await gw(fx, ['start', '--prompt', 'x', '--name', 'orch', '--json'])).stdout).id;
+  fs.writeFileSync(path.join(fx.wt(id, 'a'), 'new.txt'), 'hello\n');
+
+  const st = await gw(fx, ['status', '--json']);
+  assert.equal(st.code, 0, st.stderr);
+  const status = JSON.parse(st.stdout);
+  assert.equal(status.root, fx.root);
+  const s = status.sessions.find((x: { id: string }) => x.id === id);
+  assert.ok(s, 'session listed');
+  assert.equal(s.hasUnlandedWork, true);
+  const a = s.repos.find((x: { key: string }) => x.key === 'a');
+  assert.equal(a.untracked, 1);
+  assert.equal(s.repos.find((x: { key: string }) => x.key === 'b').untracked, 0);
+
+  const notReady = await gw(fx, ['ready', '--json']);
+  assert.equal(notReady.code, 1, 'unlanded work blocks ready');
+  const nr = JSON.parse(notReady.stdout);
+  assert.equal(nr.ready, false);
+  assert.ok(nr.sessions.some((x: { id: string; blocking: boolean }) => x.id === id && x.blocking));
+  assert.ok(nr.problems.length >= 1);
+
+  // Land it from the workspace root (not from inside the session), as an orchestrator would.
+  const done = await gw(fx, ['done', id, '--in-agent', '-m', 'feat(a): add new.txt']);
+  assert.equal(done.code, 0, done.stderr);
+  assert.equal(done.directive[0], 'NONE');
+  assert.equal(git(fx.origin('a'), ['log', '-1', '--format=%s', 'main']), 'feat(a): add new.txt');
+
+  const ready = await gw(fx, ['ready', '--json']);
+  assert.equal(ready.code, 0, ready.stdout + ready.stderr);
+  const rr = JSON.parse(ready.stdout);
+  assert.equal(rr.ready, true);
+  assert.deepEqual(rr.sessions, []);
+  assert.ok(rr.repos.every((x: { blocking: boolean }) => !x.blocking));
+});
+
+test('gw.sh: a non-TTY start never moves the caller shell, and GW_HOME is exported at source time', () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const gwSh = path.join(import.meta.dirname, '..', 'gw.sh');
+  const script = `source "${gwSh}"; echo "HOME=$GW_HOME"; gw start --prompt t --name shell >/dev/null 2>&1; echo "RC=$?"; echo "PWD=$(pwd -P)"`;
+  const { GW_HOME: _h, ...env } = process.env;
+  const out = execFileSync('bash', ['--norc', '-c', script], {
+    cwd: fx.root, encoding: 'utf8', input: '',
+    env: { ...env, GW_ROOT: fx.root, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+  });
+  assert.match(out, new RegExp(`HOME=${path.resolve(import.meta.dirname, '..').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n`));
+  assert.match(out, /RC=0\n/);
+  assert.equal(out.match(/PWD=(.*)/)![1], fs.realpathSync(fx.root));
+  assert.ok(fs.existsSync(fx.wt('WT-001-shell', 'a')), 'the session was still created');
+});

@@ -25,6 +25,8 @@
  *                       a bare `gw start` from inside a session worktree) re-enters that
  *                       session and CONTINUES the prior agent conversation by default
  *                       (--no-continue for a clean one; --new forces a brand-new session).
+ *                       Agents/scripts: --prompt <text> --name <slug> --json creates a NEW
+ *                       session with no cd and no launch, printing a JSON record.
  *   gw done   [--pr]    for EVERY repo you actually changed: merge origin/<base> in
  *                       (so the gate sees the integrated result, not the stale branch;
  *                       --no-sync opts out) -> gate -> squash-merge to <base> + push
@@ -34,9 +36,9 @@
  *                       lock serializes concurrent `gw done`s so their suites don't
  *                       starve shared test resources); --no-lock opts out.
  *   gw abort            discard every repo's branch work; <base> is never touched.
- *   gw status           one-glance check of EVERY repo + worktree: branch,
+ *   gw status [--json]  one-glance check of EVERY repo + worktree: branch,
  *                       uncommitted/untracked, ahead/behind upstream.
- *   gw ready            the "done-done" check: verifies NO session still holds unlanded
+ *   gw ready [--json]   the "done-done" check: verifies NO session still holds unlanded
  *                       work, fast-forwards each canonical checkout to origin/<base>
  *                       (--ff-only), prints a READY / NOT-ready verdict. Exit 0 = safe
  *                       to deploy.
@@ -323,6 +325,26 @@ function describeSelection(s: { model: string | null; effort: string | null }): 
   return [s.model, s.effort && `${s.effort} effort`].filter(Boolean).join(', ');
 }
 
+// --json implies --no-launch: a caller parsing JSON is never an interactive terminal.
+function noLaunch(flags: Flags): boolean { return flags.noLaunch || flags.json; }
+
+// --no-launch: the worktrees are ready, but the shell neither cd's nor launches — the
+// caller (usually an orchestrating agent) drives. stdout carries ONLY the result (the
+// session dir, or the JSON record) so it can be captured; logs stay on stderr.
+function reportSession(flags: Flags, id: string, selected: SessionAgent, launcher: string[], resumed: boolean): void {
+  const dir = sessionDir(WORKTREES_DIR, id);
+  if (flags.json) {
+    console.log(JSON.stringify({
+      id, dir, branch: `gw/${id}`, resumed, root: REPO_ROOT,
+      repos: REPO_KEYS.map((key) => ({ key, dir: sessionRepoDir(WORKTREES_DIR, id, key), base: REPOS[key].base })),
+      agent: selected.agent, model: selected.model, effort: selected.effort, launcher,
+    }, null, 2));
+  } else {
+    console.log(dir);
+  }
+  emit('NONE');
+}
+
 async function cmdStart(flags: Flags): Promise<void> {
   // --echo-prompt: self-test the prompt base64 round-trip, touch nothing else.
   if (flags.echoPrompt) {
@@ -339,10 +361,13 @@ async function cmdStart(flags: Flags): Promise<void> {
   // Resume target: an explicit session-id positional, else (unless --new) the session whose
   // worktree we're standing in — so `gw start` from inside a session re-enters it rather
   // than forking a new one. An unmatched explicit id falls through to a fresh start.
+  // A scripted start (--prompt/--name) always means a NEW session: an orchestrating agent
+  // whose shell happens to sit inside a worktree must not silently re-enter that one.
   let resumeId: string | null = null;
   const want = flags.session ? parseId(flags.session) : null;
+  const scripted = flags.prompt !== null || !!flags.name;
   if (want) resumeId = listSessions(WORKTREES_DIR).find(s => parseId(s) === want) ?? null;
-  else if (!flags.new) resumeId = resolveSessionFromCwd(WORKTREES_DIR, process.cwd());
+  else if (!flags.new && !scripted) resumeId = resolveSessionFromCwd(WORKTREES_DIR, process.cwd());
 
   if (resumeId) {
     await assertIsolatedSession(WORKTREES_DIR, resumeId, REPO_KEYS);
@@ -353,6 +378,7 @@ async function cmdStart(flags: Flags): Promise<void> {
     if (selected.agent === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, resumeId));
     const base = flags.noContinue ? agent.launcher : agent.resumeLauncher;
     const argv = launchArgv(agent, base, selected);
+    if (noLaunch(flags)) { reportSession(flags, resumeId, selected, argv, true); return; }
     // Newline-joined, not space-joined: some agents' model names contain spaces/parens
     // (e.g. agy's "Gemini 3.1 Pro (High)") that a space-join + shell word-split would
     // shatter into extra argv words. gw.sh splits this back out by line, not by IFS.
@@ -362,15 +388,22 @@ async function cmdStart(flags: Flags): Promise<void> {
 
   // Fresh: allocate a sortable WS id (+ slug from the prompt) and branch every repo
   // onto gw/<id> inside its own worktree set, so several sessions run side by side.
-  const input = await readPrompt();
+  // --prompt skips stdin/the prompt box entirely (agents and scripts).
+  const input = flags.prompt !== null
+    ? { text: flags.prompt.slice(0, PROMPT_MAX).trim(), choice: null, effort: null }
+    : await readPrompt();
   if (input === null) { log('cancelled — no session started.'); emit('NONE'); return; }
   const prompt = input.text;
-  if (prompt) log('naming session ...');
   // The namer's one Haiku call also infers a model when the prompt explicitly names
   // one (opus/sonnet/haiku/fable, mapped to the full versioned model id) — the
   // fallback for piped starts, where no picker ran. Absent both, the launcher runs
-  // on its own default model.
-  const { slug, model: inferred } = await smartSlug(prompt, { namer: WS.namer });
+  // on its own default model. --name skips the namer (no model call, no delay).
+  let slug: string, inferred: string | undefined;
+  if (flags.name) slug = flags.name;
+  else {
+    if (prompt) log('naming session ...');
+    ({ slug, model: inferred } = await smartSlug(prompt, { namer: WS.namer }));
+  }
   const choices = launchChoices();
   const picked = input.choice ?? undefined;
   const agentKey = flags.agent || picked?.agent || WS.defaultAgent;
@@ -389,6 +422,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')} with ${agentKey}${desc ? ` on ${desc}` : ''}`);
   if (agentKey === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, id));
   const launcher = launchArgv(agent, agent.launcher, selected);
+  if (noLaunch(flags)) { reportSession(flags, id, selected, launcher, false); return; }
   emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join('\n')));
 }
 
@@ -904,6 +938,12 @@ async function cmdDoctor(): Promise<void> {
     ? `ok shell: gw.sh sourced from ${sourced.join(', ')}`
     : `!! shell: gw.sh not sourced in any rc — run \`gw install\` (or add: ${sourceLine()})`);
 
+  // gw.sh exports GW_HOME when sourced; agent shells that rebuild `gw` from a snapshot
+  // (Claude Code) depend on it. Unset here = an old gw.sh was sourced, or a stale shell.
+  log(process.env.GW_HOME
+    ? `ok GW_HOME=${process.env.GW_HOME}`
+    : `.. GW_HOME not exported — agent shells (e.g. Claude Code) may fail to find gw; open a new shell (and restart the agent)`);
+
   // Workspace is optional — doctor runs anywhere. Report it if we're in one.
   try {
     const w = loadWorkspace();
@@ -934,7 +974,7 @@ async function cmdSetup(): Promise<void> {
   // The workspace is NOT baked in: the commands unset GW_ROOT and let gw discover the
   // workspace from the worktree they run in, so one install serves every workspace.
   const gwTs = fileURLToPath(import.meta.url);
-  for (const f of ['done.md', 'df.md', 'abort.md', 'donedone.md']) {
+  for (const f of ['done.md', 'df.md', 'abort.md', 'donedone.md', 'gw-sessions.md']) {
     const src = path.join(srcDir, f);
     if (!fs.existsSync(src)) { log(`MISSING command source ${src}`); continue; }
     const body = fs.readFileSync(src, 'utf-8').replaceAll('__GW_ROOT__', REPO_ROOT).replaceAll('__GW_TS__', gwTs).replaceAll('__GW_TSX__', tsxCmd());
@@ -945,7 +985,7 @@ async function cmdSetup(): Promise<void> {
     // commands. Keep one source of truth for the landing instructions, adapting only
     // the invocation name and safety flag, and install it to both agents' skill roots.
     const short = f.replace('.md', '');
-    const skillName = `gw-${short}`;
+    const skillName = short.startsWith('gw-') ? short : `gw-${short}`;
     const skillBody = body
       .replace(/^---\n/, `---\nname: ${skillName}\n`)
       .replaceAll('--in-claude', '--in-agent')
@@ -987,8 +1027,32 @@ async function worktreeStatus(wt: string): Promise<WtStatus> {
 
 const pad = (s: string, n: number): string => s.length >= n ? s : s + ' '.repeat(n - s.length);
 
-async function cmdStatus(): Promise<void> {
+async function cmdStatus(flags: Flags): Promise<void> {
   const sessions = listSessions(WORKTREES_DIR);
+  if (flags.json) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const out = [];
+    for (const id of sessions) {
+      const repos = [];
+      for (const key of REPO_KEYS) {
+        const wt = sessionRepoDir(WORKTREES_DIR, id, key);
+        if (!fs.existsSync(path.join(wt, '.git'))) continue;
+        const s = await worktreeStatus(wt);
+        const unlanded = parseInt(await gitOut(wt, ['rev-list', '--count', `origin/${REPOS[key].base}..HEAD`]) || '0', 10);
+        repos.push({ key, dir: wt, branch: s.branch, uncommitted: s.uncommitted, untracked: s.untracked, unpushed: s.ahead, unlandedCommits: unlanded });
+      }
+      const act = await sessionActivity(id);
+      const unlanded = await sessionUnlanded(id);
+      out.push({
+        id, dir: sessionDir(WORKTREES_DIR, id), branch: `gw/${id}`, ...readSessionAgent(id),
+        hasUnlandedWork: unlanded.length > 0, unlanded, startedAt: act.start, lastActivityAt: act.last,
+        idleSeconds: act.last === null ? null : nowSec - act.last, repos,
+      });
+    }
+    console.log(JSON.stringify({ root: REPO_ROOT, sessions: out }, null, 2));
+    emit('NONE');
+    return;
+  }
   if (!sessions.length) { console.log('\nNo active gw sessions. `gw start` to begin one.'); emit('NONE'); return; }
   let dirty = 0;
   for (const session of sessions) {
@@ -1063,23 +1127,33 @@ async function sessionUnlanded(session: string): Promise<string[]> {
   return unlanded;
 }
 
-async function cmdReady(): Promise<void> {
+async function cmdReady(flags: Flags): Promise<void> {
   const problems: string[] = [];
   const nowSec = Math.floor(Date.now() / 1000);
+  // --json: the same checks (including the --ff-only advance), reported as one object
+  // on stdout instead of the human lines. Exit code is unchanged: 0 = ready.
+  const say = (line: string): void => { if (!flags.json) console.log(line); };
+  const report = {
+    ready: false, root: REPO_ROOT,
+    sessions: [] as Array<{ id: string; unlanded: string[]; blocking: boolean; startedAt: number | null; lastActivityAt: number | null }>,
+    repos: [] as Array<{ key: string; dir: string; base: string; branch: string; notes: string[]; blocking: boolean }>,
+    warnings: [] as string[], problems,
+  };
 
   const sessions = listSessions(WORKTREES_DIR);
   for (const session of sessions) {
     const unlanded = await sessionUnlanded(session);
     const act = await sessionActivity(session);
     const age = activityLabel(act.start, act.last, nowSec);
+    report.sessions.push({ id: session, unlanded, blocking: unlanded.length > 0, startedAt: act.start, lastActivityAt: act.last });
     if (unlanded.length) {
-      console.log(`!! ${session} — ${unlanded.join('; ')}${age}`);
+      say(`!! ${session} — ${unlanded.join('; ')}${age}`);
       problems.push(`${session} has unlanded work — finish it (gw start ${session}, then /done) or discard it (gw abort ${session}).`);
     } else {
-      console.log(`ok ${session} — open but unchanged${age}; idle, not blocking — gw abort ${session} (or gw prune) to tidy up`);
+      say(`ok ${session} — open but unchanged${age}; idle, not blocking — gw abort ${session} (or gw prune) to tidy up`);
     }
   }
-  if (!sessions.length) console.log('ok no open gw sessions');
+  if (!sessions.length) say('ok no open gw sessions');
 
   // Canonical checkouts: fetch, fast-forward where safe, then require each to sit
   // exactly on origin/<base> with no uncommitted tracked changes.
@@ -1106,7 +1180,8 @@ async function cmdReady(): Promise<void> {
     if (behind) notes.push(`${behind} commit(s) behind origin/${base}`);
     if (untracked) notes.push(`${untracked} untracked (not blocking)`);
     const blocking = branch !== base || modified > 0 || ahead > 0 || behind > 0;
-    console.log(`${blocking ? '!! ' : 'ok '}${pad(repo, 12)} ${notes.join(', ') || `exactly origin/${base}`}`);
+    report.repos.push({ key: repo, dir, base, branch, notes, blocking });
+    say(`${blocking ? '!! ' : 'ok '}${pad(repo, 12)} ${notes.join(', ') || `exactly origin/${base}`}`);
     if (blocking) problems.push(`${repo} checkout (${dir}) is not origin/${base} — a deploy from it would not ship what landed.`);
   }
 
@@ -1118,16 +1193,21 @@ async function cmdReady(): Promise<void> {
     const notes: string[] = [];
     if (s.uncommitted) notes.push(`${s.uncommitted} uncommitted`);
     if (s.ahead) notes.push(`${s.ahead} unpushed`);
-    if (notes.length) console.log(`.. ${wd.label} — ${notes.join(', ')} (not gw-managed; commit/push it directly — warning only)`);
+    if (notes.length) {
+      report.warnings.push(`${wd.label} (${dir}): ${notes.join(', ')}`);
+      say(`.. ${wd.label} — ${notes.join(', ')} (not gw-managed; commit/push it directly — warning only)`);
+    }
   }
 
+  report.ready = problems.length === 0;
+  if (flags.json) console.log(JSON.stringify(report, null, 2));
   if (problems.length) {
-    console.log('\nNOT done-done:');
-    for (const p of problems) console.log(`  - ${p}`);
+    say('\nNOT done-done:');
+    for (const p of problems) say(`  - ${p}`);
     emit('NONE');
     process.exit(1);
   }
-  console.log(`\nREADY — nothing unlanded; ${REPO_KEYS.join(', ')} are exactly origin/<base>.`);
+  say(`\nREADY — nothing unlanded; ${REPO_KEYS.join(', ')} are exactly origin/<base>.`);
   emit('NONE');
 }
 
@@ -1268,7 +1348,8 @@ async function cmdInit(flags: Flags): Promise<void> {
 interface Flags {
   dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; quick: boolean; full: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
-  noContinue: boolean; new: boolean; show: boolean; help: boolean;
+  noContinue: boolean; new: boolean; show: boolean; help: boolean; noLaunch: boolean; json: boolean;
+  prompt: string | null; name: string;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string; agent: string; model: string; effort: string;
   unknown: string[];
 }
@@ -1276,7 +1357,8 @@ function parseFlags(argv: string[]): Flags {
   const f: Flags = {
     dryRun: false, noCheck: false, noLock: false, noSync: false, quick: false, full: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
-    noContinue: false, new: false, show: false, help: false,
+    noContinue: false, new: false, show: false, help: false, noLaunch: false, json: false,
+    prompt: null, name: '',
     message: '', session: '', olderThan: '', repoFlags: [], rc: '', agent: '', model: '', effort: '', unknown: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -1294,6 +1376,10 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--no-continue') f.noContinue = true;
     else if (a === '--new') f.new = true;
     else if (a === '--show') f.show = true;
+    else if (a === '--no-launch') f.noLaunch = true;
+    else if (a === '--json') f.json = true;
+    else if (a === '--prompt') f.prompt = argv[++i] ?? '';
+    else if (a === '--name') f.name = argv[++i] ?? '';
     else if (a === '--echo-prompt') f.echoPrompt = true;
     else if (a === '--simulate-push-reject') f.simulatePushReject = true;
     else if (a === '--print') f.print = true;
@@ -1319,9 +1405,15 @@ const HELP = `gw — Grove Workspace
   gw start [WT-id] [--no-continue] [--new]    branch every repo, choose + launch an agent
            [--agent claude|codex|grok]
            [--model id] [--effort level]
+           [--prompt text] [--name slug]
+           [--no-launch] [--json]
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
-                                              new session even inside a worktree)
+                                              new session even inside a worktree.
+                                              For agents/scripts: --prompt skips stdin,
+                                              --name skips the namer, --no-launch makes
+                                              the worktrees without cd/launch and prints
+                                              the dir, --json prints a JSON record)
   gw done [--pr] [--no-check] [--no-lock]     merge origin/<base> in, gate, then
           [--no-sync] [--quick|--full]        squash-merge each changed repo
           [-m msg]                            (one gate at a time per workspace;
@@ -1335,8 +1427,8 @@ const HELP = `gw — Grove Workspace
   gw abort [WT-id] [--yes]                    discard a session's work (shows what's
                                               unlanded first; refuses unlanded work
                                               in agent mode without --yes)
-  gw status                                   cross-repo + worktree status
-  gw ready                                    done-done check (safe to deploy?)
+  gw status [--json]                          cross-repo + worktree status
+  gw ready [--json]                           done-done check (safe to deploy?)
   gw prune [--older-than 2d] [--dry-run]      remove landed, idle sessions
   gw setup                                    (re)install Claude commands + Codex skills
 
@@ -1360,8 +1452,8 @@ const flags = parseFlags(rest);
     case 'start': return cmdStart(flags);
     case 'done': return cmdDone(flags);
     case 'abort': return cmdAbort(flags);
-    case 'status': return cmdStatus();
-    case 'ready': return cmdReady();
+    case 'status': return cmdStatus(flags);
+    case 'ready': return cmdReady(flags);
     case 'prune': return cmdPrune(flags);
     case 'setup': return cmdSetup();
     default: die(`unknown subcommand "${sub}". use: install | doctor | init | start | done | abort | status | ready | prune | setup`);

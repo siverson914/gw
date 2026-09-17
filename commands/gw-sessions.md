@@ -1,0 +1,77 @@
+---
+description: Start, inspect, land, or discard gw sessions from THIS agent session without entering them — for running several isolated multi-repo worktrees in parallel from one conversation
+---
+Manage `gw` sessions **from the outside**: create isolated multi-repo worktree sessions, do (or delegate) work in them by absolute path, then land or discard each one — all without leaving this conversation or moving your shell into a worktree. What the user asked for: $ARGUMENTS
+
+Call the gw engine **directly by path** (never the `gw` shell function — it exists to `cd` an interactive terminal and launch an agent, which is the opposite of what you want here). Run every command from the workspace root (the directory holding `gw.config.json`) or anywhere inside it; from elsewhere, wrap it in a subshell: `(cd <root> && …)`. Don't pipe these through `head`/`tail`/`grep` — the last lines carry the verdict.
+
+## 1. Start a session
+
+```bash
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" start --prompt "<one-line task description>" --name <short-kebab-slug> --json
+```
+
+- `--prompt` replaces the interactive prompt box; `--name` sets the label directly (skips the model-based namer, so it's instant). Pick a slug that says what the session is for.
+- `--json` means: create the worktrees, **don't** cd, **don't** launch an agent, and print one JSON record on stdout:
+  `{"id", "dir", "branch", "root", "repos": [{"key", "dir", "base"}], "agent", "model", "effort", "launcher"}`.
+- Every repo is on a fresh `gw/<id>` branch off `origin/<base>`. A scripted start is always a **new** session, even if your shell is inside another worktree.
+- Add `--agent`/`--model`/`--effort` only if the user wants the session labelled for a specific agent (it's recorded for a later human `gw start <id>` resume).
+
+Remember the `id` and the per-repo `dir`s — everything below uses them.
+
+## 2. Do the work
+
+Pick one:
+
+- **Yourself:** edit files by their absolute paths under the session's `dir`, and run commands with `git -C <repo dir> …` or in a subshell `(cd <repo dir> && …)`. Never edit the canonical checkouts at `<root>/<repo>` — only paths under `<root>/.worktrees/<id>/`.
+- **Delegate to a subagent** (best for parallel sessions): spawn one agent per session, and give it the task, the session `dir`, and the per-repo dirs from the JSON. Tell it: *work only under `<dir>`, use absolute paths or `(cd <repo dir> && …)`, commit or leave edits uncommitted as it likes, and do NOT run `/done`, `/abort`, or any `gw` command* — landing stays with you.
+
+## 3. Check on sessions
+
+```bash
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" status --json
+```
+
+This prints `{"root", "sessions": [{"id", "dir", "hasUnlandedWork", "unlanded", "lastActivityAt", "idleSeconds", "repos": [{"key", "dir", "branch", "uncommitted", "untracked", "unlandedCommits"}]}]}`. A session with `hasUnlandedWork: false` has nothing to land.
+
+## 4. Land a session
+
+First look at exactly what would land (read-only):
+
+```bash
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" done <id> --show --in-agent
+```
+
+Then compose a Conventional-Commits message from that diff: a subject of 72 characters or fewer (`type(scope): summary`), a blank line, 2–5 bullets on what changed and why, and a `Repos: a, b` line if more than one repo changed. Land it:
+
+```bash
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" done <id> --in-agent -m "$(cat <<'EOF'
+<subject>
+
+- <bullet>
+EOF
+)"
+```
+
+- It commits pending edits, merges `origin/<base>` in, runs every changed repo's gate, squash-merges, pushes, and removes the session's worktrees. One red gate lands nothing.
+- Success is the printed `merged + pushed: …` line.
+- A non-zero exit keeps the session for recovery, and the command is **idempotent**: fix what it names (a gate failure → fix the code under that repo's worktree dir; a merge conflict → resolve it in the named worktree and commit), then re-run the **same** command. A push race just needs a re-run.
+- Several sessions can be landed one after another. Gates are serialized per workspace automatically.
+
+## 5. Discard a session
+
+```bash
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" abort <id> --in-agent
+```
+
+If it refuses because the session has unlanded work, **do not** add `--yes` on your own. Show the user what it listed and ask whether to land it instead or really discard it. Only after they explicitly confirm, re-run with `--yes`.
+
+## 6. Before a deploy
+
+```bash
+env -u GW_ROOT __GW_TSX__ "__GW_TS__" ready --json
+```
+
+This prints `{"ready", "sessions": [...], "repos": [{"key", "branch", "notes", "blocking"}], "warnings", "problems"}` and exits 0 only when nothing is unlanded and every canonical checkout sits exactly on `origin/<base>`.
+
+Report back to the user per session: its id, what was done, and whether it landed (and to which repos), was discarded, or is still open.
