@@ -33,12 +33,12 @@ exec $SHELL                                     # reload — then `gw doctor` to
 Point it at the directory that holds your repos as siblings:
 
 ```
-~/Developer/MyProject/
+~/Github/MyProject/
   server/   web/   cli/
 ```
 
 ```bash
-cd ~/Developer/MyProject
+cd ~/Github/MyProject
 gw init          # autodetects repos, remotes, bases, deps & gates → gw.config.json
 gw start         # type your task → you're now in an isolated, multi-repo session
 ```
