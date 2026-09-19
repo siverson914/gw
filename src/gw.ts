@@ -508,7 +508,10 @@ async function cmdDone(flags: Flags): Promise<void> {
   // the land) act on the integrated result, not the stale branch in isolation. This is
   // the guardrail that makes staleness deterministic instead of something an agent has
   // to happen to notice. Default on; --no-sync opts out.
-  if (!flags.noSync) await syncPending(pending);
+  if (!flags.noSync) {
+    await syncPending(pending);
+    await syncUnchanged(session, branch, pending);
+  }
 
   // 3. Gate ALL changed repos first — one red gate stops everything, nothing merged.
   // The whole gate phase runs under a workspace-wide lock (unless --no-lock) so only
@@ -671,6 +674,28 @@ async function syncPending(pending: Pending[]): Promise<void> {
       await git(p.wt, ['merge', '--abort']);
       die(`[${p.repo}] origin/${base} advanced and conflicts with this branch. Resolve it, then re-run gw done:\n  cd ${p.wt}\n  git merge origin/${base}   # fix the conflicts, then commit\nNothing was gated or merged. (Skip this integration with --no-sync — the land still three-way merges, but the gate then runs against the un-integrated branch.)`);
     }
+  }
+}
+
+// Fast-forward this session's UNCHANGED repos to origin/<base> too. Gates often read
+// sibling repos (a parity test comparing fixtures copied into another repo, a build that
+// imports a shared package), so a sibling left at the session's fork point fails a gate
+// on code that no longer exists on <base>. These worktrees have no commits of their own,
+// so it's always a fast-forward; one that somehow can't fast-forward is left alone with a
+// note (it isn't landed either way).
+async function syncUnchanged(session: string, branch: string, pending: Pending[]): Promise<void> {
+  for (const repo of REPO_KEYS) {
+    if (pending.some((p) => p.repo === repo)) continue;
+    const wt = sessionRepoDir(WORKTREES_DIR, session, repo);
+    if (!fs.existsSync(path.join(wt, '.git'))) continue;
+    if (!(await isSessionWorktree(wt, REPOS[repo].dir, branch))) continue;
+    const base = REPOS[repo].base;
+    await git(wt, ['fetch', 'origin', base]);
+    const behind = parseInt(await gitOut(wt, ['rev-list', '--count', `HEAD..origin/${base}`]) || '0', 10);
+    if (behind === 0) continue;
+    const ff = await git(wt, ['merge', '--ff-only', '-q', `origin/${base}`]);
+    if (ff.code === 0) log(`[${repo}] unchanged here — fast-forwarded ${behind} commit(s) to origin/${base} so gates see current sibling code`);
+    else log(`[${repo}] unchanged here but can't fast-forward to origin/${base}; gates will see it as of the session's start`);
   }
 }
 

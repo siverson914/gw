@@ -295,6 +295,25 @@ test('done --show on a STALE branch previews only this session\'s work, never a 
   assert.equal(git(fx.origin('a'), ['log', '-1', '--format=%s', 'main']), 'feat: theirs', '--show must push nothing');
 });
 
+test('done fast-forwards the session\'s UNCHANGED sibling repos before the gate', async () => {
+  // The gate of the changed repo reads its sibling (like a fixture-parity test). The
+  // sibling moved on origin after the session started; gating against the stale copy
+  // failed lands for code that no longer existed on main.
+  const fx = makeFixture({ repos: { a: { gate: ['bash', '-c', 'test -f ../b/sibling-new.txt'] }, b: {} } });
+  const id = await startSession(fx);
+  fs.writeFileSync(path.join(fx.wt(id, 'a'), 'mine.txt'), 'mine\n');
+  fs.writeFileSync(path.join(fx.co('b'), 'sibling-new.txt'), 'new\n');
+  git(fx.co('b'), ['add', '-A']);
+  git(fx.co('b'), ['commit', '-q', '-m', 'feat: sibling moved']);
+  git(fx.co('b'), ['push', '-q', 'origin', 'main']);
+
+  const r = await gw(fx, ['done', id, '-m', 'feat: mine']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /\[b\] unchanged here — fast-forwarded 1 commit/);
+  assert.match(r.stderr, /merged \+ pushed: a/);
+  assert.doesNotMatch(r.stderr, /merged \+ pushed: .*b/, 'the unchanged sibling must not be landed');
+});
+
 // ── abort safety ─────────────────────────────────────────────────────────────
 
 test('abort --in-claude refuses unlanded work without --yes, discards with it', async () => {
