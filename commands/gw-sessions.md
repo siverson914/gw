@@ -35,7 +35,7 @@ Pick one:
 env -u GW_ROOT __GW_TSX__ "__GW_TS__" status --json
 ```
 
-This prints `{"root", "sessions": [{"id", "dir", "hasUnlandedWork", "unlanded", "lastActivityAt", "idleSeconds", "repos": [{"key", "dir", "branch", "uncommitted", "untracked", "unlandedCommits"}]}]}`. A session with `hasUnlandedWork: false` has nothing to land.
+This prints `{"root", "sessions": [{"id", "dir", "hasUnlandedWork", "unlanded", "lastActivityAt", "idleSeconds", "herdr", "repos": [{"key", "dir", "branch", "uncommitted", "untracked", "unlandedCommits"}]}]}`. A session with `hasUnlandedWork: false` has nothing to land. `herdr` is `null` unless the session was opened with `--herdr`; then it's `{"workspace", "tab", "pane", "openedAt", "open"}`, where `open` says whether that pane still exists (`null` when you're outside Herdr). Use it to find a tab's agent again if you've lost the ids from the start record.
 
 ## 4. Land a session
 

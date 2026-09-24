@@ -407,6 +407,28 @@ function waitForShell(pane: string): boolean {
     sleepMs(100);
   }
 }
+// The tab a session was last opened in, kept with the session (next to .gw-agent.json)
+// so `status` can tell an orchestrator which pane to follow after it has lost the ids.
+function sessionHerdrFile(id: string): string { return path.join(sessionDir(WORKTREES_DIR, id), '.gw-herdr.json'); }
+function writeSessionHerdr(id: string, t: HerdrTab): void {
+  try {
+    fs.writeFileSync(sessionHerdrFile(id), JSON.stringify({ ...t, openedAt: Math.floor(Date.now() / 1000) }, null, 2) + '\n');
+  } catch { /* best-effort: the tab is already running */ }
+}
+// open: whether that pane still exists, asked of herdr only from inside Herdr (null
+// outside, or when herdr can't answer). Herdr never reuses a closed pane id, so a
+// stale record reads as open: false rather than pointing at someone else's pane.
+function readSessionHerdr(id: string): (HerdrTab & { openedAt: number | null; open: boolean | null }) | null {
+  let t: Partial<HerdrTab & { openedAt: number }>;
+  try { t = JSON.parse(fs.readFileSync(sessionHerdrFile(id), 'utf-8')); } catch { return null; }
+  if (!t.tab || !t.pane) return null;
+  let open: boolean | null = null;
+  if (inHerdr()) {
+    const r = spawnSync(process.env.GW_HERDR_BIN || 'herdr', ['pane', 'get', t.pane], { encoding: 'utf-8' });
+    if (!r.error) open = r.status === 0;
+  }
+  return { workspace: t.workspace ?? '', tab: t.tab, pane: t.pane, openedAt: t.openedAt ?? null, open };
+}
 function launchInHerdr(flags: Flags, id: string, selected: SessionAgent, launcher: string[], prompt: string, resumed: boolean): void {
   const dir = sessionDir(WORKTREES_DIR, id);
   const workspace = process.env.HERDR_WORKSPACE_ID!;
@@ -427,6 +449,7 @@ function launchInHerdr(flags: Flags, id: string, selected: SessionAgent, launche
     die(`${e instanceof Error ? e.message : String(e)}\n    ${kept}`);
   }
   log(`opened ${id} in Herdr tab ${tab} (pane ${pane}) with ${selected.agent}; focus stays here`);
+  writeSessionHerdr(id, { workspace, tab, pane });
   reportSession(flags, id, selected, launcher, resumed, { workspace, tab, pane });
 }
 
@@ -1196,7 +1219,7 @@ async function cmdStatus(flags: Flags): Promise<void> {
       const act = await sessionActivity(id);
       const unlanded = await sessionUnlanded(id);
       out.push({
-        id, dir: sessionDir(WORKTREES_DIR, id), branch: `gw/${id}`, ...readSessionAgent(id),
+        id, dir: sessionDir(WORKTREES_DIR, id), branch: `gw/${id}`, ...readSessionAgent(id), herdr: readSessionHerdr(id),
         hasUnlandedWork: unlanded.length > 0, unlanded, startedAt: act.start, lastActivityAt: act.last,
         idleSeconds: act.last === null ? null : nowSec - act.last, repos,
       });
@@ -1208,7 +1231,8 @@ async function cmdStatus(flags: Flags): Promise<void> {
   if (!sessions.length) { console.log('\nNo active gw sessions. `gw start` to begin one.'); emit('NONE'); return; }
   let dirty = 0;
   for (const session of sessions) {
-    console.log(`\n${session}`);
+    const herdr = readSessionHerdr(session);
+    console.log(`\n${session}${herdr ? `  (herdr tab ${herdr.tab}, pane ${herdr.pane}${herdr.open === false ? ', closed' : ''})` : ''}`);
     for (const repo of REPO_KEYS) {
       const wt = sessionRepoDir(WORKTREES_DIR, session, repo);
       if (!fs.existsSync(path.join(wt, '.git'))) continue;

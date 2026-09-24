@@ -513,6 +513,8 @@ if (args[1] === 'process-info') {
   console.log(JSON.stringify({ result: { process_info: { shell_pid: 10, foreground_process_group_id: busy ? 11 : 10 } } }));
 } else if (args[1] === 'read') {
   console.log(busy ? '' : '~/x $ ');
+} else if (args[1] === 'get' && process.env.FAKE_CLOSED) {
+  console.error('{"error":"pane not found"}'); process.exit(1);
 } else if (args[0] === 'tab' && args[1] === 'create') {
   console.log(JSON.stringify({ id: 'cli:tab:create', result: { tab: { tab_id: 'wT:t42' }, root_pane: { pane_id: 'wT:p7' } } }));
 } else console.log(JSON.stringify({ id: 'cli:' + args.slice(0, 2).join(':'), result: {} }));
@@ -626,4 +628,28 @@ test('start --herdr waits for the new shell to reach its prompt before typing, a
   assert.equal(stuck.code, 0, stuck.stderr);
   assert.match(stuck.stderr, /isn't at a prompt yet; sending the launch anyway/);
   assert.equal(herdr.calls().filter((c) => c[1] === 'run').length, 2);
+});
+
+test('status records the Herdr tab a session was opened in, and whether its pane is still open', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const herdr = fakeHerdr(fx.root);
+  await gw(fx, ['start', '--prompt', 'x', '--name', 'plain', '--json']);
+  const r = await gw(fx, ['start', '--herdr', '--prompt', 'x', '--name', 'tabbed'], { env: HERDR_ENV(herdr.bin) });
+  assert.equal(r.code, 0, r.stderr);
+
+  const status = async (env: Record<string, string>) => {
+    const s = await gw(fx, ['status', '--json'], { env });
+    assert.equal(s.code, 0, s.stderr);
+    return Object.fromEntries(JSON.parse(s.stdout).sessions.map((x: { id: string; herdr: unknown }) => [x.id, x.herdr]));
+  };
+  const live = await status(HERDR_ENV(herdr.bin));
+  assert.equal(live['WT-001-plain'], null);
+  const rec = live['WT-002-tabbed'] as { tab: string; pane: string; workspace: string; openedAt: number; open: boolean };
+  assert.deepEqual({ ...rec, openedAt: 0 }, { workspace: 'wT', tab: 'wT:t42', pane: 'wT:p7', openedAt: 0, open: true });
+  assert.ok(rec.openedAt > 0);
+  assert.equal((await status({ ...HERDR_ENV(herdr.bin), FAKE_CLOSED: '1' }))['WT-002-tabbed'].open, false);
+  assert.equal((await status({ HERDR_ENV: '', HERDR_WORKSPACE_ID: '' }))['WT-002-tabbed'].open, null, 'outside Herdr it cannot tell');
+
+  const human = await gw(fx, ['status'], { env: { ...HERDR_ENV(herdr.bin), FAKE_CLOSED: '1' } });
+  assert.match(human.stdout, /WT-002-tabbed {2}\(herdr tab wT:t42, pane wT:p7, closed\)/);
 });
