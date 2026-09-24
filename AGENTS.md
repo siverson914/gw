@@ -23,6 +23,7 @@ It has two audiences:
 | Path | Role |
 |---|---|
 | `gw.sh` | The `gw` shell function. It exists only because a child process can't `cd` your shell or hand it the terminal. It runs `src/gw.ts`, reads **one directive line** from the file `$GW_OUT` names (`CD` / `CD_AND_LAUNCH` / `NONE` + dir + base64 prompt + base64 launcher argv), and acts on it. It exports `GW_HOME` when sourced, which is required for shells rebuilt from a snapshot, such as Claude Code's Bash tool. |
+| `gw-launch.sh` | Used only by `gw start --herdr`. The new Herdr tab runs `sh gw-launch.sh <session>/.gw-launch`, which decodes the staged launcher argv and prompt, deletes the file, and `exec`s the agent. This keeps the prompt out of `herdr pane run` and needs no `gw` function in the tab's shell. |
 | `src/gw.ts` | Every subcommand: flag parsing, start/done/abort/status/ready/prune/init/setup/install/doctor. |
 | `src/lib/worktrees.ts` | git plumbing: session ids (`allocateId`, `parseId`), worktree creation and removal, isolation checks, locks, namer (`smartSlug`). |
 | `src/lib/prompt-box.ts` | The TTY prompt editor and agent/model/effort picker. |

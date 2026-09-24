@@ -53,6 +53,8 @@ export interface RawConfig {
   agents?: Record<string, RawAgentCfg>;// launch/resume/model presets shown in gw start
   brandColor?: string;                 // hex, for the banner + prompt box (default: Porsche orange #f26522)
   docker?: boolean;                    // write a .dockerignore into session dirs so linked deps stay out of build contexts
+  herdr?: boolean;                     // inside Herdr, `gw start` opens the session in a new Herdr tab by default
+                                       // (as if --herdr were passed); ignored outside Herdr. --no-herdr overrides.
   sessionGate?: SessionGate | null;
   warnDirs?: WarnDir[];
   repos: Array<Partial<RepoCfg> & { key: string; dir: string }>;
@@ -95,6 +97,7 @@ export interface Workspace {
   agents: Record<string, AgentCfg>;
   brandColor: string;
   docker: boolean;
+  herdr: boolean;
   sessionGate: SessionGate | null;
   warnDirs: WarnDir[];
   repos: Record<string, RepoCfg>;
@@ -288,6 +291,7 @@ export function loadWorkspace(start = process.cwd()): Workspace {
     agents,
     brandColor: raw.brandColor || DEFAULT_BRAND,
     docker: raw.docker ?? false,
+    herdr: raw.herdr ?? false,
     sessionGate: raw.sessionGate ?? null,
     warnDirs: raw.warnDirs ?? [],
     repos,

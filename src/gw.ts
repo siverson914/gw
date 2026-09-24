@@ -27,6 +27,8 @@
  *                       (--no-continue for a clean one; --new forces a brand-new session).
  *                       Agents/scripts: --prompt <text> --name <slug> --json creates a NEW
  *                       session with no cd and no launch, printing a JSON record.
+ *                       --herdr (inside Herdr) opens the session in a new Herdr tab
+ *                       and launches the agent there; the caller's pane keeps focus.
  *   gw done   [--pr]    for EVERY repo you actually changed: merge origin/<base> in
  *                       (so the gate sees the integrated result, not the stale branch;
  *                       --no-sync opts out) -> gate -> squash-merge to <base> + push
@@ -56,6 +58,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   setWorkspace,
@@ -327,23 +330,80 @@ function describeSelection(s: { model: string | null; effort: string | null }): 
 }
 
 // --json implies --no-launch: a caller parsing JSON is never an interactive terminal.
-function noLaunch(flags: Flags): boolean { return flags.noLaunch || flags.json; }
+// --herdr is the exception: the agent launches in a new Herdr tab, not the caller's.
+function noLaunch(flags: Flags): boolean { return flags.noLaunch || (flags.json && !flags.herdr); }
 
 // --no-launch: the worktrees are ready, but the shell neither cd's nor launches — the
 // caller (usually an orchestrating agent) drives. stdout carries ONLY the result (the
 // session dir, or the JSON record) so it can be captured; logs stay on stderr.
-function reportSession(flags: Flags, id: string, selected: SessionAgent, launcher: string[], resumed: boolean): void {
+function reportSession(flags: Flags, id: string, selected: SessionAgent, launcher: string[], resumed: boolean, herdr?: HerdrTab): void {
   const dir = sessionDir(WORKTREES_DIR, id);
   if (flags.json) {
     console.log(JSON.stringify({
       id, dir, branch: `gw/${id}`, resumed, root: REPO_ROOT,
       repos: REPO_KEYS.map((key) => ({ key, dir: sessionRepoDir(WORKTREES_DIR, id, key), base: REPOS[key].base })),
       agent: selected.agent, model: selected.model, effort: selected.effort, launcher,
+      ...(herdr ? { herdr } : {}),
     }, null, 2));
+  } else if (herdr) {
+    console.log(`${id}\t${herdr.tab}`);
   } else {
     console.log(dir);
   }
   emit('NONE');
+}
+
+// ── herdr ── `gw start --herdr` opens the session in a NEW tab of the caller's Herdr
+// workspace (label = session id, cwd = session dir) and launches the agent there, so
+// the caller's pane keeps focus and its shell never cd's (the directive is NONE).
+// The launch is exactly the CD_AND_LAUNCH one (same argv, same wrapped prompt), handed
+// over through a mode-600 file in the session dir that gw-launch.sh decodes and
+// deletes. Only fixed paths are typed into the tab via `pane run`; the prompt is never
+// shell-quoted, and the tab's shell needs no gw function. Ids come from herdr's JSON
+// replies, never predicted. GW_HERDR_BIN overrides the binary (tests use a fake).
+interface HerdrTab { workspace: string; tab: string; pane: string }
+function inHerdr(): boolean { return process.env.HERDR_ENV === '1' && !!process.env.HERDR_WORKSPACE_ID; }
+// Explicit --herdr fails loudly outside Herdr (never a silent in-place launch). The
+// config default ("herdr": true) only applies inside Herdr, and only to a start that
+// would launch in place anyway: --no-launch/--json callers keep driving the session.
+function wantHerdr(flags: Flags): boolean {
+  if (flags.herdr && flags.noHerdr) die('--herdr and --no-herdr contradict each other.');
+  if (flags.herdr) {
+    if (flags.noLaunch) die('--herdr launches the agent in a new Herdr tab; drop --no-launch, or drop --herdr to only make the worktrees.');
+    if (!inHerdr()) die('--herdr needs a shell inside Herdr (HERDR_ENV=1 and HERDR_WORKSPACE_ID set). Run it from a Herdr pane, or drop --herdr to launch here.');
+    return true;
+  }
+  return WS.herdr && !flags.noHerdr && !noLaunch(flags) && inHerdr();
+}
+const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+function herdrCall(args: string[]): Record<string, any> | null {
+  const bin = process.env.GW_HERDR_BIN || 'herdr';
+  const r = spawnSync(bin, args, { encoding: 'utf-8' });
+  const what = `herdr ${args.slice(0, 2).join(' ')}`;
+  if (r.error) throw new Error(`${what}: could not run ${bin}: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`${what} failed (exit ${r.status}): ${(r.stderr || r.stdout).trim()}`);
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+function launchInHerdr(flags: Flags, id: string, selected: SessionAgent, launcher: string[], prompt: string, resumed: boolean): void {
+  const dir = sessionDir(WORKTREES_DIR, id);
+  const workspace = process.env.HERDR_WORKSPACE_ID!;
+  const file = path.join(dir, '.gw-launch');
+  fs.writeFileSync(file, `${b64(launcher.join('\n'))}\n${prompt ? b64(prompt) : ''}\n`, { mode: 0o600 });
+  const kept = `session ${id} is ready; open it with: gw start ${id}`;
+  let tab = '', pane = '';
+  try {
+    const created = herdrCall(['tab', 'create', '--workspace', workspace, '--cwd', dir, '--label', id, '--no-focus']);
+    tab = created?.result?.tab?.tab_id ?? '';
+    pane = created?.result?.root_pane?.pane_id ?? '';
+    if (!tab || !pane) throw new Error(`herdr tab create returned no tab/pane id: ${JSON.stringify(created)}`);
+    herdrCall(['pane', 'run', pane, `sh ${shq(path.join(GW_HOME, 'gw-launch.sh'))} ${shq(file)}`]);
+  } catch (e) {
+    fs.rmSync(file, { force: true });
+    if (tab) { try { herdrCall(['tab', 'close', tab]); } catch { /* best-effort */ } }
+    die(`${e instanceof Error ? e.message : String(e)}\n    ${kept}`);
+  }
+  log(`opened ${id} in Herdr tab ${tab} (pane ${pane}) with ${selected.agent}; focus stays here`);
+  reportSession(flags, id, selected, launcher, resumed, { workspace, tab, pane });
 }
 
 async function cmdStart(flags: Flags): Promise<void> {
@@ -357,6 +417,7 @@ async function cmdStart(flags: Flags): Promise<void> {
     return;
   }
 
+  const herdr = wantHerdr(flags);
   banner();
 
   // Resume target: an explicit session-id positional, else (unless --new) the session whose
@@ -380,6 +441,7 @@ async function cmdStart(flags: Flags): Promise<void> {
     const base = flags.noContinue ? agent.launcher : agent.resumeLauncher;
     const argv = launchArgv(agent, base, selected);
     if (noLaunch(flags)) { reportSession(flags, resumeId, selected, argv, true); return; }
+    if (herdr) { launchInHerdr(flags, resumeId, selected, argv, '', true); return; }
     // Newline-joined, not space-joined: some agents' model names contain spaces/parens
     // (e.g. agy's "Gemini 3.1 Pro (High)") that a space-join + shell word-split would
     // shatter into extra argv words. gw.sh splits this back out by line, not by IFS.
@@ -424,6 +486,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   if (agentKey === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, id));
   const launcher = launchArgv(agent, agent.launcher, selected);
   if (noLaunch(flags)) { reportSession(flags, id, selected, launcher, false); return; }
+  if (herdr) { launchInHerdr(flags, id, selected, launcher, prompt ? wrapPrompt(id, prompt) : '', false); return; }
   emit('CD_AND_LAUNCH', sessionDir(WORKTREES_DIR, id), prompt ? b64(wrapPrompt(id, prompt)) : '', b64(launcher.join('\n')));
 }
 
@@ -1406,6 +1469,7 @@ interface Flags {
   dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; quick: boolean; full: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean; noLaunch: boolean; json: boolean;
+  herdr: boolean; noHerdr: boolean;
   prompt: string | null; name: string;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string; agent: string; model: string; effort: string;
   unknown: string[];
@@ -1415,6 +1479,7 @@ function parseFlags(argv: string[]): Flags {
     dryRun: false, noCheck: false, noLock: false, noSync: false, quick: false, full: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false, noLaunch: false, json: false,
+    herdr: false, noHerdr: false,
     prompt: null, name: '',
     message: '', session: '', olderThan: '', repoFlags: [], rc: '', agent: '', model: '', effort: '', unknown: [],
   };
@@ -1435,6 +1500,8 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--show') f.show = true;
     else if (a === '--no-launch') f.noLaunch = true;
     else if (a === '--json') f.json = true;
+    else if (a === '--herdr') f.herdr = true;
+    else if (a === '--no-herdr') f.noHerdr = true;
     else if (a === '--prompt') f.prompt = argv[++i] ?? '';
     else if (a === '--name') f.name = argv[++i] ?? '';
     else if (a === '--echo-prompt') f.echoPrompt = true;
@@ -1464,13 +1531,20 @@ const HELP = `gw — Grove Workspace
            [--model id] [--effort level]
            [--prompt text] [--name slug]
            [--no-launch] [--json]
+           [--herdr|--no-herdr]
                                               (resume continues the prior conversation;
                                               --no-continue starts fresh, --new forces a
                                               new session even inside a worktree.
                                               For agents/scripts: --prompt skips stdin,
                                               --name skips the namer, --no-launch makes
                                               the worktrees without cd/launch and prints
-                                              the dir, --json prints a JSON record)
+                                              the dir, --json prints a JSON record.
+                                              --herdr: inside Herdr, open the session in
+                                              a new tab and launch the agent there, focus
+                                              stays put; prints "<id> <tab>" or, with
+                                              --json, the record plus its herdr ids.
+                                              "herdr": true in config makes it the default
+                                              inside Herdr; --no-herdr launches here)
   gw done [--pr] [--no-check] [--no-lock]     merge origin/<base> in, gate, then
           [--no-sync] [--quick|--full]        squash-merge each changed repo
           [-m msg]                            (one gate at a time per workspace;

@@ -105,6 +105,7 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | `gw start [WT-id] [--no-continue] [--new]` | Branch every repo, open the prompt box with **Run with** rows (agent + model) and an **Effort** row (reasoning effort for the selected agent; `default` = provider default), and launch the selection. The choice is saved with the session, so resume uses the same agent, model, and effort. `--agent`/`--model`/`--effort` are available for scripts. |
 | `gw done [--pr] [--no-check] [--quick\|--full] [-m msg]` | For every changed repo: commit, gate, squash-merge to its base, push. Untouched repos skipped; one red gate lands nothing. `--pr` opens a PR per repo instead. `--quick` runs each repo's lighter, diff-scoped `gateQuick` (falling back to the full `gate`, so never *less* safe); `--full` forces the full gate even where a repo sets `gateQuickDefault`. Without `-m`, the message is composed from the branch's own commits (the `/done` skill writes a richer one). |
 | `gw done --show` | Read-only: print the net per-repo diff that would land (the session's own work, vs the merge base with `origin/<base>` — never other people's newer commits, inverted), staging/gating/merging nothing. Used by `/done` to compose the commit message before landing. |
+| `gw start --herdr [--no-herdr]` | Inside [Herdr](https://herdr.dev): open the session in a new tab of the current Herdr workspace (label = session id, cwd = session dir) and launch the agent there with the same agent, model, effort, resume flags, and prompt as a normal start. Your pane keeps focus and your shell doesn't move. Prints the session id and tab id, tab-separated (with `--json`, the usual record plus `herdr: {workspace, tab, pane}`). Outside Herdr it fails rather than launching in place. `"herdr": true` in `gw.config.json` makes it the default inside Herdr; `--no-herdr` launches in place anyway. |
 | `gw start --prompt "…" --name slug --json` | Scripted start for agents: no prompt box, no namer, no `cd`, no launch — prints `{id, dir, branch, repos[], agent, …}`. `--no-launch` alone prints just the dir. See [Driving gw from an agent](#driving-gw-from-an-agent). |
 | `gw status [--json]` | One-glance cross-repo + worktree view: branch, uncommitted/untracked, ahead/behind. `--json` adds per-session unlanded work and idle time. |
 | `gw ready [--json]` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
@@ -165,6 +166,15 @@ Agents learn this without being told: `gw init`/`gw setup` keep a short **gw gui
 
 The installed command calls `src/gw.ts` by path rather than the `gw` shell function. `--prompt`/`--name` always create a **new** session, even from inside a worktree. `--json` output goes to stdout alone, and logs go to stderr.
 
+To hand a session to a fresh, visible agent instead of working it yourself, run the start from inside Herdr with `--herdr`:
+
+```bash
+gw start --herdr --agent claude --prompt "$(cat brief.md)" --name retry-fix --json
+# → {"id":"WT-012-retry-fix", …, "herdr":{"workspace":"w1","tab":"w1:t5","pane":"w1:p9"}}
+```
+
+The agent starts in a new, unfocused Herdr tab named after the session. The prompt goes over through a mode-600 file in the session dir (`.gw-launch`, removed once read), not typed into the pane, so multi-line text, quotes and `$` arrive intact. The only thing typed into the tab is `sh <gw>/gw-launch.sh <file>`, so the tab's shell doesn't need the `gw` function. Land or discard it later by id, as above. `herdr: true` in config never applies to `--json` or `--no-launch` starts, so orchestration scripts keep driving their own sessions unless they ask for a tab.
+
 Without a terminal, the `gw` shell function never `cd`s or launches. It creates the worktrees and prints where they are, so an agent's persistent shell isn't moved into a new worktree. When sourced, `gw.sh` also exports `GW_HOME`. That keeps `gw` working in shells that rebuild functions from a snapshot, such as Claude Code's Bash tool. (`gw doctor` checks this. If it's missing, open a new shell and restart the agent.)
 
 ## How launching works (the one bit of plumbing)
@@ -196,6 +206,7 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` �
   "namer": "claude --model claude-haiku-4-5",      // titles each session from its prompt (fallback: plain slug)
   "brandColor": "#f26522",                         // banner + prompt-box accent
   "docker": false,                                 // write .dockerignore into session dirs (linked deps stay out of build contexts)
+  "herdr": false,                                  // inside Herdr, `gw start` opens each session in a new Herdr tab (as --herdr)
   "sessionGate": null,                             // optional cross-repo check (see below)
   "warnDirs": [],                                  // published-but-not-gw-managed dirs `ready` warns about
   "repos": [

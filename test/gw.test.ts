@@ -492,3 +492,112 @@ test('setup maintains ONE gw guidance block in the workspace CLAUDE.md/AGENTS.md
   await gw(fx, ['setup'], { env: { HOME: home, CODEX_HOME: path.join(home, '.codex') } });
   assert.equal(fs.readFileSync(path.join(fx.root, 'CLAUDE.md'), 'utf8'), after2);
 });
+
+// ── herdr: start --herdr opens the session in a new Herdr tab ────────────────
+// A fake `herdr` (GW_HERDR_BIN) records each call and answers with herdr-shaped JSON,
+// so the whole plan (tab create args, the command typed into the pane) is checked
+// without a live Herdr. The recorded pane command is then run for real against a fake
+// agent, proving the prompt reaches the agent's argv intact.
+
+function fakeHerdr(root: string): { bin: string; calls: () => string[][] } {
+  const log = path.join(root, 'herdr-calls.jsonl');
+  const bin = path.join(root, 'fake-herdr');
+  fs.writeFileSync(bin, `#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'tab' && args[1] === 'create') {
+  console.log(JSON.stringify({ id: 'cli:tab:create', result: { tab: { tab_id: 'wT:t42' }, root_pane: { pane_id: 'wT:p7' } } }));
+} else console.log(JSON.stringify({ id: 'cli:' + args.slice(0, 2).join(':'), result: {} }));
+`, { mode: 0o755 });
+  return { bin, calls: () => fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) };
+}
+const HERDR_ENV = (bin: string) => ({ GW_HERDR_BIN: bin, HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'wT' });
+
+test('start --herdr outside Herdr fails loudly before making any session', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const r = await gw(fx, ['start', '--herdr', '--prompt', 'x', '--name', 'x'], { env: { HERDR_ENV: '', HERDR_WORKSPACE_ID: '' } });
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /--herdr needs a shell inside Herdr/);
+  assert.ok(!fs.existsSync(path.join(fx.root, '.worktrees', 'WT-001-x')), 'no session on a refused --herdr');
+  const both = await gw(fx, ['start', '--herdr', '--no-launch', '--prompt', 'x', '--name', 'x'], { env: { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'wT' } });
+  assert.notEqual(both.code, 0);
+  assert.match(both.stderr, /drop --no-launch/);
+});
+
+test('start --herdr opens a tab at the session dir and hands the exact launch + prompt to it', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const herdr = fakeHerdr(fx.root);
+  // A fake agent that records its argv, so we see exactly what the tab would launch.
+  const argvOut = path.join(fx.root, 'agent-argv.json');
+  const agentBin = path.join(fx.root, 'fake-agent');
+  fs.writeFileSync(agentBin, `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(argvOut)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));\n`, { mode: 0o755 });
+  const cfg = JSON.parse(fs.readFileSync(path.join(fx.root, 'gw.config.json'), 'utf8'));
+  cfg.agents = { fake: { launcher: `${agentBin} --mode auto`, models: ['Big Model (High)'] } };
+  fs.writeFileSync(path.join(fx.root, 'gw.config.json'), JSON.stringify(cfg));
+
+  const prompt = `line one\nit's "quoted" with $HOME, \`ticks\` and $(whoami)\n--- trailing rule`;
+  const r = await gw(fx, ['start', '--herdr', '--agent', 'fake', '--model', 'Big Model (High)', '--prompt', prompt, '--name', 'hd', '--json'], { env: HERDR_ENV(herdr.bin) });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.directive[0], 'NONE', 'the caller shell must not cd or launch');
+  const info = JSON.parse(r.stdout);
+  assert.equal(info.id, 'WT-001-hd');
+  assert.deepEqual(info.herdr, { workspace: 'wT', tab: 'wT:t42', pane: 'wT:p7' });
+
+  const calls = herdr.calls();
+  assert.deepEqual(calls[0], ['tab', 'create', '--workspace', 'wT', '--cwd', fx.sessionDir(info.id), '--label', info.id, '--no-focus']);
+  assert.equal(calls[1][0], 'pane'); assert.equal(calls[1][1], 'run'); assert.equal(calls[1][2], 'wT:p7');
+  const cmd = calls[1][3];
+  assert.match(cmd, /^sh '.*\/gw-launch\.sh' '.*\/\.gw-launch'$/);
+  assert.ok(!cmd.includes('quoted'), 'the prompt is never typed into the pane');
+  const launchFile = path.join(fx.sessionDir(info.id), '.gw-launch');
+  assert.equal(fs.statSync(launchFile).mode & 0o777, 0o600);
+
+  // Run what the tab's shell would run, with no gw function around.
+  execFileSync('bash', ['--norc', '-c', cmd], { cwd: fx.sessionDir(info.id), env: { PATH: process.env.PATH } });
+  const got = JSON.parse(fs.readFileSync(argvOut, 'utf8'));
+  assert.deepEqual(got.argv.slice(0, 5), ['--mode', 'auto', '--model', 'Big Model (High)', '--']);
+  assert.equal(got.argv.length, 6, 'the prompt is ONE argv word');
+  assert.ok(got.argv[5].endsWith(`─── task ───\n${prompt}`), 'same wrapped prompt as an in-place launch, byte for byte');
+  assert.ok(!fs.existsSync(launchFile), 'the launch file is consumed so it can never replay');
+
+  // Resume in a tab: same session, resume launcher, no prompt; plain output is "<id>\t<tab>".
+  const resumed = await gw(fx, ['start', info.id, '--herdr'], { env: HERDR_ENV(herdr.bin) });
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(resumed.stdout.trim(), `${info.id}\twT:t42`);
+  assert.equal(fs.readFileSync(path.join(fx.sessionDir(info.id), '.gw-launch'), 'utf8').split('\n')[1], '', 'a resume carries no prompt');
+});
+
+test('"herdr": true in config makes tabs the default inside Herdr only; --no-herdr and --json opt out', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const herdr = fakeHerdr(fx.root);
+  const cfg = JSON.parse(fs.readFileSync(path.join(fx.root, 'gw.config.json'), 'utf8'));
+  fs.writeFileSync(path.join(fx.root, 'gw.config.json'), JSON.stringify({ ...cfg, herdr: true }));
+
+  const inTab = await gw(fx, ['start', '--prompt', 'x', '--name', 'one'], { env: HERDR_ENV(herdr.bin) });
+  assert.equal(inTab.code, 0, inTab.stderr);
+  assert.equal(inTab.directive[0], 'NONE');
+  assert.equal(inTab.stdout.trim(), 'WT-001-one\twT:t42');
+
+  const here = await gw(fx, ['start', '--no-herdr', '--prompt', 'x', '--name', 'two'], { env: HERDR_ENV(herdr.bin) });
+  assert.equal(here.directive[0], 'CD_AND_LAUNCH', '--no-herdr launches in place');
+  const outside = await gw(fx, ['start', '--prompt', 'x', '--name', 'three'], { env: { GW_HERDR_BIN: herdr.bin, HERDR_ENV: '', HERDR_WORKSPACE_ID: '' } });
+  assert.equal(outside.directive[0], 'CD_AND_LAUNCH', 'the config default is ignored outside Herdr');
+  const json = await gw(fx, ['start', '--prompt', 'x', '--name', 'four', '--json'], { env: HERDR_ENV(herdr.bin) });
+  assert.equal(JSON.parse(json.stdout).herdr, undefined, 'a --json orchestrator keeps driving; no tab');
+  assert.equal(herdr.calls().filter((c) => c[1] === 'create').length, 1, 'only the first start opened a tab');
+});
+
+test('start --herdr: a failed pane run closes the new tab and keeps the session', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const herdr = fakeHerdr(fx.root);
+  const src = fs.readFileSync(herdr.bin, 'utf8').replace("} else console.log", "} else if (args[1] === 'run') { console.error('{\"error\":\"pane gone\"}'); process.exit(1); } else console.log");
+  fs.writeFileSync(herdr.bin, src);
+  const r = await gw(fx, ['start', '--herdr', '--prompt', 'x', '--name', 'bad'], { env: HERDR_ENV(herdr.bin) });
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /pane gone/);
+  assert.match(r.stderr, /gw start WT-001-bad/);
+  assert.deepEqual(herdr.calls().at(-1), ['tab', 'close', 'wT:t42']);
+  assert.ok(fs.existsSync(fx.wt('WT-001-bad', 'a')), 'the session survives');
+  assert.ok(!fs.existsSync(path.join(fx.sessionDir('WT-001-bad'), '.gw-launch')));
+});
