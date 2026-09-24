@@ -376,13 +376,36 @@ function wantHerdr(flags: Flags): boolean {
   return WS.herdr && !flags.noHerdr && !noLaunch(flags) && inHerdr();
 }
 const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
-function herdrCall(args: string[]): Record<string, any> | null {
+function herdrText(args: string[]): string {
   const bin = process.env.GW_HERDR_BIN || 'herdr';
   const r = spawnSync(bin, args, { encoding: 'utf-8' });
   const what = `herdr ${args.slice(0, 2).join(' ')}`;
   if (r.error) throw new Error(`${what}: could not run ${bin}: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`${what} failed (exit ${r.status}): ${(r.stderr || r.stdout).trim()}`);
-  try { return JSON.parse(r.stdout); } catch { return null; }
+  return r.stdout;
+}
+function herdrCall(args: string[]): Record<string, any> | null {
+  try { return JSON.parse(herdrText(args)); } catch (e) { if (e instanceof SyntaxError) return null; throw e; }
+}
+// `pane run` types into the new tab's shell, and a shell still running its rc (plugin
+// managers, zsh instant prompt) can swallow typed-ahead input. So wait until the pane
+// has drawn a prompt AND the shell itself holds the foreground (no rc child running),
+// on two polls in a row. Past GW_HERDR_READY_MS (default 10s) type anyway: typeahead
+// usually survives, and a wedged rc is the user's to see in that tab.
+function sleepMs(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+function waitForShell(pane: string): boolean {
+  const limit = parseInt(process.env.GW_HERDR_READY_MS ?? '', 10);
+  const deadline = Date.now() + (Number.isFinite(limit) && limit >= 0 ? limit : 10_000);
+  let streak = 0;
+  for (;;) {
+    const info = herdrCall(['pane', 'process-info', '--pane', pane])?.result?.process_info;
+    const idle = !!info && info.foreground_process_group_id === info.shell_pid;
+    const drawn = idle && herdrText(['pane', 'read', pane, '--source', 'visible']).trim() !== '';
+    streak = drawn ? streak + 1 : 0;
+    if (streak >= 2) return true;
+    if (Date.now() >= deadline) return false;
+    sleepMs(100);
+  }
 }
 function launchInHerdr(flags: Flags, id: string, selected: SessionAgent, launcher: string[], prompt: string, resumed: boolean): void {
   const dir = sessionDir(WORKTREES_DIR, id);
@@ -396,6 +419,7 @@ function launchInHerdr(flags: Flags, id: string, selected: SessionAgent, launche
     tab = created?.result?.tab?.tab_id ?? '';
     pane = created?.result?.root_pane?.pane_id ?? '';
     if (!tab || !pane) throw new Error(`herdr tab create returned no tab/pane id: ${JSON.stringify(created)}`);
+    if (!waitForShell(pane)) log(`the shell in Herdr tab ${tab} isn't at a prompt yet; sending the launch anyway`);
     herdrCall(['pane', 'run', pane, `sh ${shq(path.join(GW_HOME, 'gw-launch.sh'))} ${shq(file)}`]);
   } catch (e) {
     fs.rmSync(file, { force: true });
@@ -1032,6 +1056,14 @@ async function cmdDoctor(): Promise<void> {
   log(process.env.GW_HOME
     ? `ok GW_HOME=${process.env.GW_HOME}`
     : `.. GW_HOME not exported — agent shells (e.g. Claude Code) may fail to find gw; open a new shell (and restart the agent)`);
+
+  // Herdr is optional: only `gw start --herdr` (or "herdr": true) needs it.
+  if (inHerdr()) {
+    const herdrOk = (await run('bash', ['-lc', 'command -v herdr'])).code === 0;
+    log(`${tick(herdrOk)}herdr: inside workspace ${process.env.HERDR_WORKSPACE_ID}${herdrOk ? '; gw start --herdr available' : ', but the herdr CLI is not on PATH'}`);
+  } else {
+    log('.. herdr: not inside Herdr (gw start --herdr needs a Herdr pane)');
+  }
 
   // Workspace is optional — doctor runs anywhere. Report it if we're in one.
   try {

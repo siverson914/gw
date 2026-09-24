@@ -506,7 +506,14 @@ function fakeHerdr(root: string): { bin: string; calls: () => string[][] } {
 const fs = require('fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
-if (args[0] === 'tab' && args[1] === 'create') {
+// FAKE_BUSY_POLLS: the shell reports an rc child in the foreground for that many polls.
+const polls = fs.readFileSync(${JSON.stringify(log)}, 'utf8').split('\\n').filter((l) => l.includes('process-info')).length;
+const busy = polls <= Number(process.env.FAKE_BUSY_POLLS || 0);
+if (args[1] === 'process-info') {
+  console.log(JSON.stringify({ result: { process_info: { shell_pid: 10, foreground_process_group_id: busy ? 11 : 10 } } }));
+} else if (args[1] === 'read') {
+  console.log(busy ? '' : '~/x $ ');
+} else if (args[0] === 'tab' && args[1] === 'create') {
   console.log(JSON.stringify({ id: 'cli:tab:create', result: { tab: { tab_id: 'wT:t42' }, root_pane: { pane_id: 'wT:p7' } } }));
 } else console.log(JSON.stringify({ id: 'cli:' + args.slice(0, 2).join(':'), result: {} }));
 `, { mode: 0o755 });
@@ -546,8 +553,9 @@ test('start --herdr opens a tab at the session dir and hands the exact launch + 
 
   const calls = herdr.calls();
   assert.deepEqual(calls[0], ['tab', 'create', '--workspace', 'wT', '--cwd', fx.sessionDir(info.id), '--label', info.id, '--no-focus']);
-  assert.equal(calls[1][0], 'pane'); assert.equal(calls[1][1], 'run'); assert.equal(calls[1][2], 'wT:p7');
-  const cmd = calls[1][3];
+  const runCall = calls.find((c) => c[1] === 'run')!;
+  assert.deepEqual(runCall.slice(0, 3), ['pane', 'run', 'wT:p7']);
+  const cmd = runCall[3];
   assert.match(cmd, /^sh '.*\/gw-launch\.sh' '.*\/\.gw-launch'$/);
   assert.ok(!cmd.includes('quoted'), 'the prompt is never typed into the pane');
   const launchFile = path.join(fx.sessionDir(info.id), '.gw-launch');
@@ -600,4 +608,22 @@ test('start --herdr: a failed pane run closes the new tab and keeps the session'
   assert.deepEqual(herdr.calls().at(-1), ['tab', 'close', 'wT:t42']);
   assert.ok(fs.existsSync(fx.wt('WT-001-bad', 'a')), 'the session survives');
   assert.ok(!fs.existsSync(path.join(fx.sessionDir('WT-001-bad'), '.gw-launch')));
+});
+
+test('start --herdr waits for the new shell to reach its prompt before typing, and gives up after the timeout', async () => {
+  const fx = makeFixture({ repos: { a: {} } });
+  const herdr = fakeHerdr(fx.root);
+  // The shell's rc keeps a child in the foreground for 3 polls, then a prompt shows.
+  const r = await gw(fx, ['start', '--herdr', '--prompt', 'x', '--name', 'slow'], { env: { ...HERDR_ENV(herdr.bin), FAKE_BUSY_POLLS: '3' } });
+  assert.equal(r.code, 0, r.stderr);
+  const kinds = herdr.calls().map((c) => c[1]);
+  const run = kinds.indexOf('run');
+  assert.equal(kinds.slice(0, run).filter((k) => k === 'process-info').length, 5, '3 busy polls, then 2 ready ones in a row');
+  assert.doesNotMatch(r.stderr, /isn't at a prompt/);
+
+  // A shell that never settles: type anyway after GW_HERDR_READY_MS, and say so.
+  const stuck = await gw(fx, ['start', '--herdr', '--prompt', 'x', '--name', 'stuck'], { env: { ...HERDR_ENV(herdr.bin), FAKE_BUSY_POLLS: '1000', GW_HERDR_READY_MS: '300' } });
+  assert.equal(stuck.code, 0, stuck.stderr);
+  assert.match(stuck.stderr, /isn't at a prompt yet; sending the launch anyway/);
+  assert.equal(herdr.calls().filter((c) => c[1] === 'run').length, 2);
 });

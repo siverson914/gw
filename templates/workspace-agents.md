@@ -11,8 +11,9 @@ This directory is a **gw workspace**. Each task runs in its own **session**: one
 | You were launched inside `.worktrees/<WT-id>/` and the work is finished | `/done` (Codex: `$gw-done`). Use `/df` to skip the gate. |
 | You were launched inside a session and the work should be thrown away | `/abort` (`$gw-abort`). It never discards unlanded work without the user's OK. |
 | You're at the workspace root and want to run one or more tasks in isolated sessions (in parallel, or delegated to subagents) without leaving this conversation | `/gw-sessions` (`$gw-sessions`). It covers `start --prompt … --name … --json`, `status --json`, `done <id> --in-agent`, `abort <id> --in-agent`, and `ready --json`. |
+| Inside Herdr (`HERDR_ENV=1`), the user wants a task handed to its own agent in a separate tab they can watch | `/gw-sessions` with `start --herdr … --json`: it opens the session in a new Herdr tab, launches the agent there with the prompt as its brief, and returns the tab and pane ids. |
 | "Is everything landed? Safe to deploy?" | `/donedone` (`$gw-donedone`), or `gw ready --json` |
 
-From an agent's shell, call gw through those commands (they run `gw.ts` by path), not the interactive `gw` shell function. Never run `gw start` without `--json`/`--no-launch` from an agent: it's meant for a human at a terminal.
+From an agent's shell, call gw through those commands (they run `gw.ts` by path), not the interactive `gw` shell function. Never run `gw start` without `--json`/`--no-launch` from an agent: it's meant for a human at a terminal. The one exception is `--herdr`, which launches the agent in a new Herdr tab instead of your shell.
 
 **Tell the user whether each session landed.** The `merged + pushed: …` line is the proof. A failed `done` keeps the session, and re-running the same command is the fix.

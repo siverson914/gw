@@ -16,7 +16,7 @@ gw ready   → "is anything unlanded, and does every checkout match origin?" (ex
 
 It has two audiences:
 - **A human in a terminal.** `gw start` opens a prompt box, then cd's into the session and launches Claude, Codex, Grok, or agy.
-- **An agent.** Inside a session it uses `/done` / `/abort`. From outside it manages sessions with `/gw-sessions`: `start --prompt … --name … --json`, `status --json`, `done <id> --in-agent`, `ready --json`. See README → "Driving gw from an agent".
+- **An agent.** Inside a session it uses `/done` / `/abort`. From outside it manages sessions with `/gw-sessions`: `start --prompt … --name … --json`, `status --json`, `done <id> --in-agent`, `ready --json`. Inside Herdr it can also hand a session to its own agent in a new tab with `start --herdr`. See README → "Driving gw from an agent".
 
 ## Layout
 
