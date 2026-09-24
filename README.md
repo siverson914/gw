@@ -119,8 +119,8 @@ Legacy `WS-` session ids created before the `WT-` rename are still resolvable an
 The `gw start` picker gives each provider its own independently ordered row:
 
 ```text
-Claude:  claude-fable-5-1 claude-opus-5   claude-sonnet-5   claude-haiku-4-5
-Codex:   gpt-5.6-sol      gpt-5.6-terra   gpt-5.6-luna      gpt-5.5
+Claude:  claude-fable-5-1 claude-opus-5-5 claude-sonnet-5   claude-haiku-4-5
+Codex:   gpt-6-astra      gpt-6-sol       gpt-6-luna        gpt-5.6-terra
 ```
 
 Left/right changes model within an agent and up/down switches agent rows. The
@@ -193,14 +193,14 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` â
     "claude": {
       "launcher": "claude --permission-mode auto",
       "resumeLauncher": "claude --permission-mode auto --continue",
-      "models": ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+      "models": ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5"],
       "defaultModel": "claude-sonnet-5"
     },
     "codex": {
       "launcher": "codex --ask-for-approval never --sandbox danger-full-access",
       "resumeLauncher": "codex resume --last --ask-for-approval never --sandbox danger-full-access",
-      "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
-      "defaultModel": "gpt-5.6-terra"
+      "models": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra"],
+      "defaultModel": "gpt-6-sol"
     }
   },
   "namer": "claude --model claude-haiku-4-5",      // titles each session from its prompt (fallback: plain slug)

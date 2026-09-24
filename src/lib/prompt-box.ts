@@ -22,7 +22,7 @@
  *
  *    Provider:                Claude model:            Effort:
  *     1: Claude                1: claude-fable-5-1      1: default
- *     2: Codex                 2: claude-opus-5         2: low
+ *     2: Codex                 2: claude-opus-5-5       2: low
  *     3: Grok                  3: claude-sonnet-5       3: medium
  *     4: Agy                   4: claude-haiku-4-5      ...
  *

@@ -112,7 +112,7 @@ export function activityLabel(startSec: number | null, lastSec: number | null, n
 // flags. Anything the namer emits outside this set is ignored.
 const NAMER_MODELS = new Map([
   ['fable', 'claude-fable-5-1'],
-  ['opus', 'claude-opus-5'],
+  ['opus', 'claude-opus-5-5'],
   ['sonnet', 'claude-sonnet-5'],
   ['haiku', 'claude-haiku-4-5'],
 ]);

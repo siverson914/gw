@@ -113,8 +113,8 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     launcher: DEFAULT_LAUNCHER,
     resumeLauncher: `${DEFAULT_LAUNCHER} --continue`,
     // Full model ids (not bare aliases) so a session's launch line always shows
-    // the exact version being run: Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5.
-    models: ['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    // the exact version being run: Fable 5.1, Opus 5.5, Sonnet 5, Haiku 4.5.
+    models: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
     defaultModel: 'claude-sonnet-5',
     modelFlag: '--model',
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], // `claude --help`: --effort choices
@@ -132,11 +132,11 @@ export const DEFAULT_AGENTS: Record<string, Required<RawAgentCfg>> = {
     // under `-a never` those writes fail silently back to the model instead of prompting.
     launcher: 'codex --ask-for-approval never --sandbox danger-full-access',
     resumeLauncher: 'codex resume --last --ask-for-approval never --sandbox danger-full-access',
-    models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
-    defaultModel: 'gpt-5.6-terra',
+    models: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-terra'],
+    defaultModel: 'gpt-6-sol',
     modelFlag: '--model',
-    // Union across the served models (~/.codex/models_cache.json); max/ultra exist
-    // only on the gpt-5.6 flagships — older models cap at xhigh.
+    // Union across the served models (`codex debug models`); max exists on gpt-6/5.6,
+    // ultra only on astra/sol/terra (the luna models cap at max).
     efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     defaultEffort: null, // Codex falls back to config.toml's model_reasoning_effort
     effortFlag: '-c model_reasoning_effort=', // no dedicated flag; set via config override
