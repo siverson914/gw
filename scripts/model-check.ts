@@ -22,6 +22,7 @@ const dryRun = process.argv.includes('--dry-run');
 const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'gw');
 const snapshotFile = join(stateDir, 'models.json');
 const logFile = join(stateDir, 'model-check.md');
+const CLAUDE_SECRET = 'anthropic/api-key'; // AWS Secrets Manager id
 
 type Snapshot = Record<string, string[]>;
 
@@ -34,10 +35,16 @@ async function sh(cmd: string, args: string[]): Promise<string> {
 // that can't be asked is skipped (and keeps its previous snapshot).
 const fetchers: Record<string, () => Promise<string[]>> = {
   async claude() {
-    const key = process.env.ANTHROPIC_API_KEY;
-    if (!key) throw new Error('skipped: no ANTHROPIC_API_KEY (set it in ~/.config/gw/env)');
+    // ANTHROPIC_API_KEY wins if set; otherwise read it from AWS Secrets Manager.
+    const key = process.env.ANTHROPIC_API_KEY
+      || (await sh('aws', ['secretsmanager', 'get-secret-value', '--secret-id', CLAUDE_SECRET, '--query', 'SecretString', '--output', 'text'])).trim();
+    // A Console API key goes in x-api-key; a Claude OAuth token (sk-ant-oat…,
+    // from `claude setup-token`) is a bearer token behind the oauth beta.
+    const auth: Record<string, string> = key.startsWith('sk-ant-oat')
+      ? { authorization: `Bearer ${key}`, 'anthropic-beta': 'oauth-2025-04-20' }
+      : { 'x-api-key': key };
     const res = await fetch('https://api.anthropic.com/v1/models?limit=1000', {
-      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      headers: { ...auth, 'anthropic-version': '2023-06-01' },
     });
     if (!res.ok) throw new Error(`models API ${res.status}`);
     const body = (await res.json()) as { data: { id: string }[] };
