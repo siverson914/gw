@@ -465,6 +465,26 @@ test('gw.sh: a non-TTY start never moves the caller shell, and GW_HOME is export
   assert.ok(fs.existsSync(fx.wt('WT-001-shell', 'a')), 'the session was still created');
 });
 
+// zsh's `pwd -P` succeeds on a deleted cwd, so the old guard never fired there and
+// node died with `uv_cwd ENOENT` before gw.ts ran.
+for (const sh of ['zsh', 'bash']) {
+  test(`gw.sh (${sh}): a deleted cwd is left for the workspace root before node starts`, (t) => {
+    try { execFileSync(sh, ['-c', 'true']); } catch { t.skip(`${sh} not installed`); return; }
+    const fx = makeFixture({ repos: { a: {} } });
+    const gwSh = path.join(import.meta.dirname, '..', 'gw.sh');
+    const dead = path.join(fx.root, '.worktrees', 'WT-009-gone');
+    fs.mkdirSync(dead, { recursive: true });
+    const script = `source "${gwSh}"; cd "${dead}" && rmdir "${dead}" && gw ready >/dev/null 2>&1; echo "RC=$?"; echo "PWD=$(pwd -P)"`;
+    const { GW_ROOT: _r, ...env } = process.env;
+    const out = execFileSync(sh, sh === 'zsh' ? ['-f', '-c', script] : ['--norc', '-c', script], {
+      cwd: fx.root, encoding: 'utf8', input: '',
+      env: { ...env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+    });
+    assert.match(out, /RC=0\n/);
+    assert.equal(out.match(/PWD=(.*)/)![1], fs.realpathSync(fx.root));
+  });
+}
+
 test('setup maintains ONE gw guidance block in the workspace CLAUDE.md/AGENTS.md without touching the rest', async () => {
   const fx = makeFixture();
   const home = fs.mkdtempSync(path.join(fx.root, 'home-'));

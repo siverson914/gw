@@ -63,7 +63,9 @@ gw() {
   # node — tsx/esbuild call process.cwd() at startup and would otherwise die with
   # `uv_cwd ENOENT` before any gw.ts logic runs. Root resolution above is pure
   # shell (dirname on the $PWD string), so it survives a dead cwd to get us here.
-  if ! pwd -P >/dev/null 2>&1; then cd "$root" 2>/dev/null || cd "$HOME" || return 1; fi
+  # Test with `-ef`, not `pwd -P`: zsh's `pwd -P` quietly falls back to $PWD and
+  # succeeds on a deleted cwd. `-ef` is false once $PWD no longer resolves to `.`.
+  if ! [ . -ef "$PWD" ]; then cd "$root" 2>/dev/null || cd "$HOME" || return 1; fi
 
   tsx="$home/node_modules/.bin/tsx"
   out="$(mktemp)"
@@ -143,5 +145,5 @@ EOF
   # `gw done`/`gw abort` delete the session worktree we may be sitting in. The CD
   # directive normally moves us out, but an --in-agent path emits NONE — leaving the
   # shell in a deleted cwd, where the next `pwd` fails. Land somewhere real.
-  if ! pwd -P >/dev/null 2>&1; then cd "$root" || return 1; fi
+  if ! [ . -ef "$PWD" ]; then cd "$root" || return 1; fi
 }
