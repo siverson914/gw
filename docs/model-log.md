@@ -2,6 +2,8 @@
 
 Changes to the built-in agent model lists in `src/config.ts` (`DEFAULT_AGENTS`), newest first.
 
+`scripts/model-check.ts` runs daily and raises a desktop alert when a provider's lineup changes (its own log: `~/.local/state/gw/model-check.md`). When you act on one, record it here.
+
 ## 2026-09-24
 
 - **Claude:** `claude-opus-5` → `claude-opus-5-5`. Fable 5.1, Sonnet 5, Haiku 4.5 unchanged.

@@ -31,6 +31,7 @@ It has two audiences:
 | `commands/*.md` | Agent instructions. `gw setup` installs them to `~/.claude/commands/`, and as Codex/agy `SKILL.md`s, replacing `__GW_TSX__` / `__GW_TS__` with this machine's paths. They must never contain a workspace path, and must call gw as `env -u GW_ROOT … gw.ts` (a test enforces this). |
 | `templates/workspace-agents.md` | The block `gw setup`/`gw init` keeps up to date between `<!-- gw:begin -->` / `<!-- gw:end -->` markers in a workspace's `CLAUDE.md` and `AGENTS.md`. |
 | `test/gw.test.ts`, `test/fixture.ts` | End-to-end suite: the real CLI against throwaway workspaces with local bare-repo "origins". Nothing is mocked. |
+| `scripts/model-check.ts` | Daily check (systemd timer `gw-model-check`) that alerts when a provider starts or stops serving a model. It never edits `DEFAULT_AGENTS`; update them by hand and log it in `docs/model-log.md`. |
 | `docs/` | Postmortems. Read `postmortem-stale-deploy.md` before touching the post-land fast-forward. |
 
 ## Working on it
