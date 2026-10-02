@@ -548,11 +548,11 @@ function resolveSession(flags: Flags): string | null {
 
 interface Pending { repo: RepoKey; wt: string; branch: string; name: string; }
 
-// Gate timeout: 12 min default. GW_GATE_TIMEOUT_MS overrides — primarily so the test
+// Gate timeout: 25 min default (an iOS gate on a Mac busy with parallel sessions ran past 12). GW_GATE_TIMEOUT_MS overrides — primarily so the test
 // harness can exercise the timeout path in milliseconds instead of minutes.
 function gateTimeoutMs(): number {
   const v = parseInt(process.env.GW_GATE_TIMEOUT_MS ?? '', 10);
-  return Number.isFinite(v) && v > 0 ? v : 12 * 60_000;
+  return Number.isFinite(v) && v > 0 ? v : 25 * 60_000;
 }
 /** "90000" → "1.5m", "2000" → "2s" — for timeout messages. */
 function fmtMs(ms: number): string {
