@@ -13,10 +13,11 @@
 import { test, after } from 'node:test';
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeFixture, gw, git, startSession, cleanupFixtures } from './fixture.js';
-import { parseId, slugify } from '../src/lib/worktrees.js';
+import { parseId, slugify, toolchainArgv, findOnPath } from '../src/lib/worktrees.js';
 
 after(cleanupFixtures);
 
@@ -209,6 +210,35 @@ test('a hung gate is reported as a TIMEOUT, not "exit null"', async () => {
   assert.match(r.stderr, /TIMED OUT after 0\.7s/);
   assert.doesNotMatch(r.stderr, /exit null/);
   assert.ok(fs.existsSync(fx.sessionDir(id)));
+});
+
+test('toolchainArgv wraps a gate in `mise exec -C <worktree>` only when mise exists', () => {
+  assert.deepStrictEqual(toolchainArgv(['just', 'test-fast'], '/w/platform', '/usr/bin/mise'),
+    ['/usr/bin/mise', 'exec', '-C', '/w/platform', '--', 'just', 'test-fast']);
+  assert.deepStrictEqual(toolchainArgv(['just', 'test-fast'], '/w/platform', null), ['just', 'test-fast']);
+});
+
+// The real bug: gw launched from the workspace root runs under the GLOBAL node, and a
+// gate in a worktree pinned by .nvmrc must still get the pinned major. Needs mise with
+// idiomatic .nvmrc support and a second node major installed; without that there is
+// nothing to distinguish, so the test says so and skips.
+test('a gate runs under the node major pinned by its worktree .nvmrc, not gw\'s own', async (t) => {
+  const mise = findOnPath('mise');
+  if (!mise) return t.skip('mise not installed');
+  const own = process.versions.node.split('.')[0];
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-nvmrc-'));
+  const pinned = ['24', '22', '26'].find((v) => {
+    if (v === own) return false;
+    fs.writeFileSync(path.join(probe, '.nvmrc'), `${v}\n`);
+    try { return execFileSync(mise, ['exec', '-C', probe, '--', 'node', '-v'], { encoding: 'utf8' }).startsWith(`v${v}.`); } catch { return false; }
+  });
+  fs.rmSync(probe, { recursive: true, force: true });
+  if (!pinned) return t.skip(`mise resolves no node major other than ${own} from .nvmrc here`);
+  const fx = makeFixture({ repos: { a: { gate: ['bash', '-c', `node -v | grep -q '^v${pinned}\\.' || { node -v; exit 7; }`] } } });
+  const id = await startSession(fx);
+  fs.writeFileSync(path.join(fx.wt(id, 'a'), '.nvmrc'), `${pinned}\n`);
+  const r = await gw(fx, ['done', id, '-m', 'pin node']);
+  assert.strictEqual(r.code, 0, r.stderr);
 });
 
 test('quick tier: gateQuickDefault runs gateQuick with GW_CHANGED_FILES; --full forces the full gate', async () => {

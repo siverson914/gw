@@ -66,7 +66,7 @@ import {
   ensureSession, removeSession, listSessions, resolveSessionFromCwd,
   assertIsolatedSession, isSessionWorktree, type RepoKey, type RunResult,
   sessionDir, sessionRepoDir, withRepoLandLock, withGateLock, stagedLinkPaths,
-  landTmpRoot, landTmpDir, sweepLandTmp, activityLabel,
+  landTmpRoot, landTmpDir, sweepLandTmp, activityLabel, toolchainArgv,
 } from './lib/worktrees.js';
 import { promptBox } from './lib/prompt-box.js';
 import {
@@ -650,7 +650,8 @@ async function cmdDone(flags: Flags): Promise<void> {
         const gateEnv = { GW_BASE: `origin/${base}`, GW_CHANGED_FILES: changed.split('\n').filter(Boolean).join('\n') };
         const label = scoped ? 'quick gate' : 'gate';
         log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
-        const g = await run(gate[0], gate.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) });
+        const argv = toolchainArgv(gate, p.wt);
+        const g = await run(argv[0], argv.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) });
         // A timeout SIGKILLs the process tree and surfaces as `code: null` — say so
         // explicitly instead of the cryptic "gate failed (exit null)" (which historically
         // meant an OOM-killed or hung suite and sent people down the wrong path).
@@ -668,7 +669,8 @@ async function cmdDone(flags: Flags): Promise<void> {
         if (fs.existsSync(wt)) {
           for (const cmd of sg.commands) {
             log(`[${sg.repo}] session gate: ${cmd.join(' ')} ...`);
-            const d = await run(cmd[0], cmd.slice(1), { cwd: wt, timeoutMs: Math.min(gateTimeoutMs(), 5 * 60_000), onStdout: (s) => process.stderr.write(s) });
+            const argv = toolchainArgv(cmd, wt);
+            const d = await run(argv[0], argv.slice(1), { cwd: wt, timeoutMs: Math.min(gateTimeoutMs(), 5 * 60_000), onStdout: (s) => process.stderr.write(s) });
             if (d.timedOut) die(`session gate TIMED OUT after ${fmtMs(Math.min(gateTimeoutMs(), 5 * 60_000))} and was killed (${cmd.join(' ')}). Re-run gw done. Nothing was merged.`);
             if (d.code !== 0) die(`session gate failed (${cmd.join(' ')}). Fix, commit any regenerated files, then re-run gw done. Nothing was merged.`);
           }

@@ -45,6 +45,25 @@ export function run(cmd: string, args: string[], o: { cwd?: string; timeoutMs?: 
   });
 }
 
+/** Wrap a gate command so it runs under the toolchain pinned in its OWN worktree.
+ *  gw's process (and so every child it spawns) inherits whatever PATH launched gw,
+ *  e.g. mise's global Node 26 from the workspace root, so a repo's `.nvmrc` (24) was
+ *  silently ignored and native addons built for 24 failed to load. With mise on PATH,
+ *  `mise exec -C <cwd> --` re-resolves node/just/etc. from the worktree's own version
+ *  files. Without mise, the command runs unchanged. */
+export function toolchainArgv(cmd: string[], cwd: string, mise: string | null = findOnPath('mise')): string[] {
+  return mise ? [mise, 'exec', '-C', cwd, '--', ...cmd] : cmd;
+}
+
+export function findOnPath(bin: string): string | null {
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    const p = path.join(dir, bin);
+    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* not here */ }
+  }
+  return null;
+}
+
 export function git(cwd: string, args: string[], timeoutMs = 60_000): Promise<RunResult> {
   return run('git', ['-C', cwd, ...args], { timeoutMs });
 }
