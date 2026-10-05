@@ -703,3 +703,57 @@ test('status records the Herdr tab a session was opened in, and whether its pane
   const human = await gw(fx, ['status'], { env: { ...HERDR_ENV(herdr.bin), FAKE_CLOSED: '1' } });
   assert.match(human.stdout, /WT-002-tabbed {2}\(herdr tab wT:t42, pane wT:p7, closed\)/);
 });
+
+// ── write guard: canonical checkouts are read-only for agents ────────────────
+const GUARD = path.join(import.meta.dirname, '..', 'hooks', 'guard.mjs');
+function guard(input: object, env: NodeJS.ProcessEnv = {}): { code: number; stderr: string } {
+  const { GW_ALLOW_MAIN: _a, ...base } = process.env;
+  try {
+    execFileSync('node', [GUARD], { input: JSON.stringify(input), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env: { ...base, ...env } });
+    return { code: 0, stderr: '' };
+  } catch (e) {
+    const err = e as { status: number; stderr: string };
+    return { code: err.status, stderr: err.stderr };
+  }
+}
+
+test('write guard blocks canonical edits, allows worktrees, ignored files, outside paths and the bypass', async () => {
+  const fx = makeFixture();
+  fs.writeFileSync(path.join(fx.co('a'), '.gitignore'), '.env\n');
+  const id = await startSession(fx);
+  const edit = (file_path: string) => ({ cwd: fx.root, tool_name: 'Edit', tool_input: { file_path } });
+
+  const blocked = guard(edit(path.join(fx.co('a'), 'src', 'x.ts')));
+  assert.equal(blocked.code, 2);
+  assert.match(blocked.stderr, /canonical a checkout, which is read-only/);
+  assert.ok(blocked.stderr.includes(path.join(fx.wt(id, 'a'), 'src', 'x.ts')), 'points at the same file in the open session');
+
+  assert.equal(guard({ cwd: fx.co('a'), tool_input: { file_path: 'README.md' } }).code, 2, 'relative paths resolve against cwd');
+  assert.equal(guard({ cwd: fx.root, tool_input: { notebook_path: path.join(fx.co('b'), 'n.ipynb') } }).code, 2, 'NotebookEdit too');
+  assert.equal(guard(edit(path.join(fx.wt(id, 'a'), 'src', 'x.ts'))).code, 0, 'session worktree edits pass');
+  assert.equal(guard(edit(path.join(fx.co('a'), '.env'))).code, 0, 'git-ignored files in a canonical checkout pass');
+  assert.equal(guard(edit(path.join(fx.root, 'notes.md'))).code, 0, 'workspace-root files pass');
+  assert.equal(guard(edit(path.join(os.tmpdir(), 'elsewhere.txt'))).code, 0, 'files outside any workspace pass');
+  assert.equal(guard(edit(path.join(fx.co('a'), 'src', 'x.ts')), { GW_ALLOW_MAIN: '1' }).code, 0, 'GW_ALLOW_MAIN=1 bypasses');
+  assert.equal(guard({ tool_input: {} }).code, 0, 'no path: nothing to guard');
+});
+
+test('setup installs the write guard into .claude/settings.json once, keeping other hooks', async () => {
+  const fx = makeFixture();
+  const home = fs.mkdtempSync(path.join(fx.root, 'home-'));
+  const settingsFile = path.join(fx.root, '.claude', 'settings.json');
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  const other = { matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'echo other' }] };
+  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: { PreToolUse: [other], Stop: [{ hooks: [{ type: 'command', command: 'echo stop' }] }] }, permissions: { allow: ['Bash(ls)'] } }));
+
+  const env = { HOME: home, CODEX_HOME: path.join(home, '.codex') };
+  for (let i = 0; i < 2; i++) assert.equal((await gw(fx, ['setup'], { env })).code, 0);
+  const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  const guards = s.hooks.PreToolUse.filter((e: { hooks: Array<{ command: string }> }) => e.hooks.some((h) => h.command.includes('guard.mjs')));
+  assert.equal(guards.length, 1, 'exactly one guard entry after two runs');
+  assert.equal(guards[0].matcher, 'Write|Edit|MultiEdit|NotebookEdit');
+  assert.ok(guards[0].hooks[0].command.includes(GUARD));
+  assert.deepStrictEqual(s.hooks.PreToolUse[0], other, 'existing PreToolUse hook kept');
+  assert.equal(s.hooks.Stop[0].hooks[0].command, 'echo stop');
+  assert.deepStrictEqual(s.permissions, { allow: ['Bash(ls)'] });
+});

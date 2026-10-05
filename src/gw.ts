@@ -1140,6 +1140,32 @@ function installAgentGuidance(): void {
   }
 }
 
+// Install the write guard (hooks/guard.mjs) as a PreToolUse hook in the workspace's
+// .claude/settings.json, merged in place: other hooks and settings are kept, and an
+// existing gw guard entry is refreshed rather than duplicated. Project-level, so it
+// covers every Claude session started anywhere in the workspace, worktrees included.
+const GUARD_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit';
+function installClaudeGuard(): void {
+  const file = path.join(REPO_ROOT, '.claude', 'settings.json');
+  let settings: Record<string, unknown> = {};
+  try { settings = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch (e) {
+    if (fs.existsSync(file)) { log(`!! ${file} is not valid JSON; write guard NOT installed: ${e instanceof Error ? e.message : String(e)}`); return; }
+  }
+  type HookEntry = { matcher?: string; hooks?: Array<{ type: string; command: string }> };
+  const hooks = (settings.hooks ??= {}) as Record<string, HookEntry[]>;
+  const pre = (hooks.PreToolUse ??= []);
+  const command = `node "${path.join(GW_HOME, 'hooks', 'guard.mjs')}"`;
+  const isGuard = (e: HookEntry) => e.hooks?.some((h) => h.command.includes('guard.mjs'));
+  const kept = pre.filter((e) => !isGuard(e));
+  const next = [...kept, { matcher: GUARD_MATCHER, hooks: [{ type: 'command', command }] }];
+  const before = JSON.stringify(pre);
+  hooks.PreToolUse = next;
+  if (before === JSON.stringify(next)) { log(`ok  write guard already installed in ${file}`); return; }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
+  log(`installed write guard (canonical checkouts read-only) -> ${file}`);
+}
+
 async function cmdSetup(): Promise<void> {
   const srcDir = path.join(GW_HOME, 'commands');
   const dstDir = path.join(os.homedir(), '.claude', 'commands');
@@ -1174,6 +1200,7 @@ async function cmdSetup(): Promise<void> {
     }
   }
   installAgentGuidance();
+  installClaudeGuard();
   for (const k of REPO_KEYS) log(`${fs.existsSync(path.join(REPOS[k].dir, '.git')) ? 'ok' : '!!'}  ${k} repo at ${REPOS[k].dir}`);
   for (const bin of ['git', 'gh', ...AGENT_TABLE.map((a) => a.binary), 'node']) log(`${(await run('bash', ['-lc', `command -v ${bin}`])).code === 0 ? 'ok' : '!!'}  ${bin}`);
   log(rcFilesSourcing().length ? `shell: gw.sh already sourced (gw doctor to verify).` : `enable the gw command:  gw install   (adds '${sourceLine()}' to your shell rc)`);
