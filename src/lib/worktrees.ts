@@ -359,11 +359,11 @@ export async function isSessionWorktree(wt: string, canonicalDir: string, branch
   try { st = fs.statSync(path.join(wt, '.git')); } catch { return false; }
   if (!st.isFile()) return false;                                          // dir `.git` → canonical checkout, not isolated
   if (await gitOut(wt, ['rev-parse', '--abbrev-ref', 'HEAD']) !== branch) return false;
-  try { // best-effort object-store match — tolerate rev-parse quirks (FILE+branch already strong)
+  try { // best-effort object-store match (FILE+branch already strong). `.native` returns the on-disk case, so a cwd typed as ~/github/shreddy still matches on macOS
     let common = await gitOut(wt, ['rev-parse', '--git-common-dir']);
     if (!common) return true;
     if (!path.isAbsolute(common)) common = path.resolve(wt, common);
-    if (fs.realpathSync(common) !== fs.realpathSync(path.join(canonicalDir, '.git'))) return false;
+    if (fs.realpathSync.native(common) !== fs.realpathSync.native(path.join(canonicalDir, '.git'))) return false;
   } catch { /* tolerate */ }
   return true;
 }
@@ -523,7 +523,7 @@ export function listSessions(worktreesRoot: string): string[] {
  *  first so a symlinked root (e.g. macOS /var → /private/var, where process.cwd()
  *  reports the real path but GW_ROOT keeps the link) still resolves. */
 export function resolveSessionFromCwd(worktreesRoot: string, cwd: string): string | null {
-  const real = (p: string): string => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const real = (p: string): string => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
   const rel = path.relative(real(worktreesRoot), real(cwd));
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   const seg = rel.split(path.sep)[0];
