@@ -419,6 +419,13 @@ test('start --prompt --name --json makes a session without cd/launch and prints 
   }
   assert.equal(info.agent, 'claude');
   assert.ok(Array.isArray(info.launcher) && info.launcher[0] === 'claude');
+  const marker = JSON.parse(fs.readFileSync(path.join(fx.sessionDir(info.id), '.gw-session.json'), 'utf8'));
+  assert.equal(marker.id, info.id);
+  assert.equal(marker.prompt, 'add the widget api');
+  assert.equal(marker.launch, 'scripted');
+  assert.ok(!Number.isNaN(Date.parse(marker.started_at)));
+  assert.ok('herdr_pane_id' in marker.owner && 'claude_session_id' in marker.owner);
+  for (const repo of info.repos) assert.equal(git(repo.dir, ['status', '--porcelain']), '', 'the marker must sit outside every repo');
 });
 
 test('start --no-launch prints just the session dir; a scripted start inside a worktree makes a NEW session', async () => {

@@ -304,6 +304,20 @@ function sessionAgentFile(id: string): string { return path.join(sessionDir(WORK
 function writeSessionAgent(id: string, selected: SessionAgent): void {
   fs.writeFileSync(sessionAgentFile(id), JSON.stringify(selected, null, 2) + '\n');
 }
+// .gw-session.json: who started this session and why, for tools that watch
+// worktrees (Gipity Control). Lives in the session folder, outside every repo,
+// so `git add -A` in a worktree never picks it up. The owner is the agent tab
+// that ran `gw start`: its Herdr pane and Claude session, from its environment.
+function writeSessionMarker(id: string, name: string, prompt: string, launch: string): void {
+  const marker = {
+    id, name, prompt: prompt.slice(0, 2000), started_at: new Date().toISOString(), launch,
+    owner: {
+      herdr_pane_id: process.env.HERDR_PANE_ID || null,
+      claude_session_id: process.env.CLAUDE_CODE_SESSION_ID || null,
+    },
+  };
+  fs.writeFileSync(path.join(sessionDir(WORKTREES_DIR, id), '.gw-session.json'), JSON.stringify(marker, null, 2) + '\n');
+}
 function readSessionAgent(id: string): SessionAgent {
   try {
     const saved = JSON.parse(fs.readFileSync(sessionAgentFile(id), 'utf-8')) as Partial<SessionAgent>;
@@ -528,6 +542,7 @@ async function cmdStart(flags: Flags): Promise<void> {
   await assertIsolatedSession(WORKTREES_DIR, id, REPO_KEYS);
   const selected: SessionAgent = { agent: agentKey, model: model ?? null, effort };
   writeSessionAgent(id, selected);
+  writeSessionMarker(id, slug, prompt, herdr ? 'herdr' : noLaunch(flags) ? 'scripted' : 'terminal');
   const desc = describeSelection(selected);
   log(`started ${id} (gw/${id}) across ${REPO_KEYS.join(', ')} with ${agentKey}${desc ? ` on ${desc}` : ''}`);
   if (agentKey === 'claude') seedMcpApproval(sessionDir(WORKTREES_DIR, id));
