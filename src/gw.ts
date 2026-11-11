@@ -633,9 +633,21 @@ async function cmdDone(flags: Flags): Promise<void> {
   // the land) act on the integrated result, not the stale branch in isolation. This is
   // the guardrail that makes staleness deterministic instead of something an agent has
   // to happen to notice. Default on; --no-sync opts out.
+  // Where the time went, printed as one line at the end (and before a gate failure), so a slow
+  // `gw done` says whether it was the lock wait, a gate or the land.
+  const startedAt = Date.now();
+  const timings: string[] = [];
+  const timed = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
+    const t = Date.now();
+    try { return await fn(); } finally { timings.push(`${label} ${fmtMs(Date.now() - t)}`); }
+  };
+  const logTimings = () => log(`timings: ${timings.join(', ')} (total ${fmtMs(Date.now() - startedAt)})`);
+
   if (!flags.noSync) {
-    await syncPending(pending);
-    await syncUnchanged(session, branch, pending);
+    await timed('sync', async () => {
+      await syncPending(pending);
+      await syncUnchanged(session, branch, pending);
+    });
   }
 
   // 3. Gate ALL changed repos first — one red gate stops everything, nothing merged.
@@ -666,7 +678,8 @@ async function cmdDone(flags: Flags): Promise<void> {
         const label = scoped ? 'quick gate' : 'gate';
         log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
         const argv = toolchainArgv(gate, p.wt);
-        const g = await run(argv[0], argv.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) });
+        const g = await timed(`${label} ${p.repo}`, () => run(argv[0], argv.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) }));
+        if (g.timedOut || g.code !== 0) logTimings();
         // A timeout SIGKILLs the process tree and surfaces as `code: null` — say so
         // explicitly instead of the cryptic "gate failed (exit null)" (which historically
         // meant an OOM-killed or hung suite and sent people down the wrong path).
@@ -694,8 +707,14 @@ async function cmdDone(flags: Flags): Promise<void> {
       }
     };
     if (flags.noLock) await runGates();
-    else await withGateLock(path.join(WORKTREES_DIR, 'gw-gate.lock'), runGates,
-      { onWait: () => log('another gw gate is running — waiting for it to finish before starting this one (use --no-lock to skip)...') });
+    else {
+      const asked = Date.now();
+      await withGateLock(path.join(WORKTREES_DIR, 'gw-gate.lock'), () => {
+        const waited = Date.now() - asked;
+        if (waited >= 1000) timings.push(`lock wait ${fmtMs(waited)}`);
+        return runGates();
+      }, { onWait: () => log('another gw gate is running — waiting for it to finish before starting this one (use --no-lock to skip)...') });
+    }
   }
 
   if (flags.dryRun) {
@@ -707,10 +726,11 @@ async function cmdDone(flags: Flags): Promise<void> {
   // report per repo. Only tear the session down if EVERY repo landed.
   const landed: string[] = [], failed: string[] = [];
   for (const p of pending) {
-    const r = await landRepo(p, flags);
+    const r = await timed(`land ${p.repo}`, () => landRepo(p, flags));
     (r.ok ? landed : failed).push(r.ok ? p.repo : `${p.repo}: ${r.reason}`);
   }
   if (!failed.length) await removeSession(WORKTREES_DIR, session, REPO_KEYS, branch);
+  logTimings();
   if (landed.length) log(flags.pr ? `PR opened: ${landed.join(', ')}` : `merged + pushed: ${landed.join(', ')}`);
   if (failed.length) die(`did NOT land:\n  ${failed.join('\n  ')}\n(any repos listed above as landed are already done; ${session} kept for the rest.)`);
   return finishCd(flags);

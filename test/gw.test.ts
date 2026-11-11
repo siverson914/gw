@@ -259,6 +259,8 @@ test('quick tier: gateQuickDefault runs gateQuick with GW_CHANGED_FILES; --full 
   const r1 = await gw(fx, ['done', id1, '-m', 'feat: one'], { env });
   assert.equal(r1.code, 0, r1.stderr);
   assert.ok(fs.existsSync(path.join(fx.root, 'quick')), 'quick gate should run by default');
+  // One line says where the time went: sync, the gate and the land, with a total.
+  assert.match(r1.stderr, /gw: timings: sync [\d.]+m?s, quick gate a [\d.]+m?s, land a [\d.]+m?s \(total [\d.]+m?s\)/);
   assert.ok(!fs.existsSync(path.join(fx.root, 'full')), 'full gate should NOT run');
   assert.match(fs.readFileSync(path.join(fx.root, 'changed'), 'utf8'), /newfile\.txt/);
 
