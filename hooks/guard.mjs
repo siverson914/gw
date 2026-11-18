@@ -12,8 +12,16 @@
  * INTO worktrees, so the canonical copy is the one to edit). GW_ALLOW_MAIN=1
  * bypasses it for a deliberate one-off.
  *
- * Contract: JSON on stdin ({ cwd, tool_input: { file_path | notebook_path } });
- * exit 2 + stderr blocks the tool call and shows the reason to the agent.
+ * It also refuses a Bash `npm install` / `npm ci` (and the other npm commands
+ * that rewrite node_modules) run inside a session worktree. A worktree's
+ * node_modules are links into the canonical checkout's, so npm there replaces the
+ * links with real dirs and can gut the canonical install every session shares.
+ * `npm install --package-lock-only` (edits only package-lock.json) is allowed.
+ * Install in the canonical checkout instead, then `gw relink --all`.
+ *
+ * Contract: JSON on stdin ({ cwd, tool_name, tool_input: { file_path |
+ * notebook_path | command } }); exit 2 + stderr blocks the tool call and shows
+ * the reason to the agent.
  */
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -37,10 +45,30 @@ function isIgnored(repoDir, file) {
   try { execFileSync('git', ['-C', repoDir, 'check-ignore', '-q', file], { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
+// npm subcommands (and aliases) that write node_modules.
+const NPM_WRITES = /(?:^|[\s;&|()])npm\s+(?:[-\w=]+\s+)*?(install|i|in|ins|inst|insta|instal|isnt|isntall|add|ci|clean-install|install-clean|ic|install-test|it|uninstall|un|unlink|remove|rm|r|update|up|upgrade|udpate|dedupe|ddp|prune|rebuild|rb|link|ln)(?=\s|$|[;&|)])/;
+
+/** The block message for an npm install inside a session worktree, or null. */
+function npmInWorktree(command, cwd) {
+  const m = NPM_WRITES.exec(command);
+  if (!m) return null;
+  if (/--package-lock-only\b/.test(command)) return null;
+  const root = findWorkspace(cwd);
+  const inSession = (root && within(cwd, path.join(root, '.worktrees'))) || /(?:^|[\s/'"=])\.worktrees\/[^/\s]+\//.test(command);
+  if (!inSession) return null;
+  return `gw: \`npm ${m[1]}\` inside a gw session worktree is blocked: the worktree's node_modules are links into the canonical checkout, and npm would replace them and can wreck the install every session shares. Add a dependency with \`npm install --package-lock-only --ignore-scripts <pkg>\` here (it only edits package.json/package-lock.json), install for real in the canonical checkout after it lands, then run \`gw relink --all\`.\n`;
+}
+
 function main(raw) {
-  if (process.env.GW_ALLOW_MAIN === '1') return 0;
   let input;
   try { input = JSON.parse(raw); } catch { return 0; }
+  const command = input?.tool_input?.command;
+  if (typeof command === 'string') {
+    const msg = npmInWorktree(command, path.resolve(input.cwd || process.cwd()));
+    if (msg) { process.stderr.write(msg); return 2; }
+    return 0;
+  }
+  if (process.env.GW_ALLOW_MAIN === '1') return 0;
   const target = input?.tool_input?.file_path ?? input?.tool_input?.notebook_path;
   if (typeof target !== 'string' || !target) return 0;
   const file = path.resolve(input.cwd || process.cwd(), target);

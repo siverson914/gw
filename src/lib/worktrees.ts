@@ -417,6 +417,137 @@ export function linkNodeModules(srcNm: string, dstNm: string, scope?: string): v
       fs.symlinkSync(target, link);
     }
   }
+  fs.writeFileSync(path.join(dstNm, FARM_STAMP), canonicalInstallStamp(srcNm));
+}
+
+const FARM_STAMP = '.gw-farm-stamp';
+
+/** `fs.existsSync` without following the final symlink, so a DANGLING link counts. */
+function lexists(p: string): boolean {
+  try { fs.lstatSync(p); return true; } catch { return false; }
+}
+
+export interface RelinkReport { added: string[]; removed: string[]; foreign: string[] }
+
+/**
+ * Bring an existing per-worktree node_modules farm (see linkNodeModules) back in
+ * line with the canonical node_modules it mirrors. The farm is a snapshot taken at
+ * session start: a dependency another session lands (and the canonical checkout
+ * then installs, hoisted to its root) is invisible to an open worktree until its
+ * farm gains the new link. Converges, never deletes real files:
+ *   - adds a link for every canonical entry the farm lacks;
+ *   - removes farm links that dangle or no longer point at the canonical entry of
+ *     the same name (a package the canonical install dropped);
+ *   - keeps the worktree's own workspace-scope links (e.g. @acme/server ->
+ *     ../../server, which must resolve to THIS worktree), adding any new scope
+ *     packages and dropping dangling ones;
+ *   - leaves any real (non-symlink) entry alone and reports it as `foreign`:
+ *     that is what an `npm install` run inside the worktree leaves behind.
+ * A plain-symlink node_modules (no scope farm) always tracks canonical; nothing to do.
+ */
+export function relinkNodeModules(srcNm: string, dstNm: string, scope?: string): RelinkReport {
+  const r: RelinkReport = { added: [], removed: [], foreign: [] };
+  if (!fs.existsSync(srcNm)) return r;
+  if (!lexists(dstNm)) { linkNodeModules(srcNm, dstNm, scope); r.added.push('(node_modules)'); return r; }
+  const st = fs.lstatSync(dstNm);
+  if (st.isSymbolicLink()) return r;
+  if (!scope || !fs.existsSync(path.join(srcNm, scope))) { r.foreign.push('(node_modules is a real directory, expected a link)'); return r; }
+  for (const entry of fs.readdirSync(dstNm)) {
+    if (entry === FARM_STAMP) continue;
+    const dst = path.join(dstNm, entry);
+    if (entry === scope) {
+      if (!fs.lstatSync(dst).isDirectory()) { r.foreign.push(entry); continue; }
+      // Drop only scope links canonical no longer has; a scope package that is still
+      // in canonical keeps the worktree's own link even if it dangles right now.
+      for (const pkg of fs.readdirSync(dst)) {
+        const link = path.join(dst, pkg);
+        if (fs.lstatSync(link).isSymbolicLink() && !fs.existsSync(link) && !lexists(path.join(srcNm, entry, pkg))) {
+          fs.unlinkSync(link); r.removed.push(`${entry}/${pkg}`);
+        }
+      }
+      continue;
+    }
+    if (!fs.lstatSync(dst).isSymbolicLink()) { r.foreign.push(entry); continue; }
+    const want = path.join(srcNm, entry);
+    if (fs.readlinkSync(dst) !== want || !lexists(want)) { fs.unlinkSync(dst); r.removed.push(entry); }
+  }
+  for (const entry of fs.readdirSync(srcNm)) {
+    const dst = path.join(dstNm, entry);
+    if (entry === scope) {
+      fs.mkdirSync(dst, { recursive: true });
+      const srcScope = path.join(srcNm, entry);
+      for (const pkg of fs.readdirSync(srcScope)) {
+        const link = path.join(dst, pkg);
+        if (lexists(link)) continue;
+        let target: string;
+        try { target = fs.readlinkSync(path.join(srcScope, pkg)); } catch { target = path.join(srcScope, pkg); }
+        fs.symlinkSync(target, link);
+        r.added.push(`${entry}/${pkg}`);
+      }
+      continue;
+    }
+    if (lexists(dst)) continue;
+    fs.symlinkSync(path.join(srcNm, entry), dst);
+    r.added.push(entry);
+  }
+  // Stamp what the farm now mirrors, so farmIsStale() can tell when the canonical
+  // install changes again (npm rewrites node_modules/.package-lock.json every install).
+  fs.writeFileSync(path.join(dstNm, FARM_STAMP), canonicalInstallStamp(srcNm));
+  return r;
+}
+
+/** Identifies one canonical install: mtime + size of npm's hidden lockfile. */
+function canonicalInstallStamp(srcNm: string): string {
+  try { const st = fs.statSync(path.join(srcNm, '.package-lock.json')); return `${st.mtimeMs}:${st.size}\n`; }
+  catch { return 'none\n'; }
+}
+
+/** True when a farm was built from a different canonical install than the current one. */
+export function farmIsStale(srcNm: string, dstNm: string): boolean {
+  try {
+    if (fs.lstatSync(dstNm).isSymbolicLink()) return false;
+    return fs.readFileSync(path.join(dstNm, FARM_STAMP), 'utf-8') !== canonicalInstallStamp(srcNm);
+  } catch { return lexists(dstNm); }
+}
+
+/** Relink every node_modules linkPath of a session's repos. `onlyStale` skips farms
+ *  whose canonical install hasn't changed since they were last linked. */
+export function relinkSession(worktreesRoot: string, sessionId: string, repos: RepoKey[] = ws.repoKeys, opts: { onlyStale?: boolean } = {}): Array<{ repo: RepoKey; rel: string; report: RelinkReport }> {
+  const out: Array<{ repo: RepoKey; rel: string; report: RelinkReport }> = [];
+  for (const repo of repos) {
+    const cfg = ws.repos[repo];
+    const wt = sessionRepoDir(worktreesRoot, sessionId, repo);
+    if (!fs.existsSync(path.join(wt, '.git'))) continue;
+    for (const rel of cfg.linkPaths) {
+      if (path.basename(rel) !== 'node_modules') continue;
+      const src = path.join(cfg.dir, rel), dst = path.join(wt, rel);
+      if (opts.onlyStale && !farmIsStale(src, dst)) continue;
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      out.push({ repo, rel, report: relinkNodeModules(src, dst, cfg.nmScope) });
+    }
+  }
+  return out;
+}
+
+/** Glob (`*` = one path segment's chars, `**` = any depth) to an anchored RegExp. */
+export function globToRegExp(glob: string): RegExp {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') {
+      i++;
+      if (glob[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*';
+    } else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** The changed files that match any of the globs. */
+export function matchingFiles(files: string[], globs: string[]): string[] {
+  const res = globs.map(globToRegExp);
+  return files.filter((f) => res.some((r) => r.test(f)));
 }
 
 /** Create (or re-enter) a session's worktree set: for each repo, a worktree at
@@ -455,6 +586,12 @@ export async function ensureSession(worktreesRoot: string, sessionId: string, br
     // restored on the next call instead of silently leaving the gate without deps.
     for (const rel of cfg.linkPaths) {
       const src = path.join(cfg.dir, rel), dst = path.join(wt, rel);
+      // An existing node_modules farm is re-synced against canonical on re-entry,
+      // so deps another session landed (and canonical installed) show up here too.
+      if (path.basename(rel) === 'node_modules' && lexists(dst) && fs.existsSync(src)) {
+        relinkNodeModules(src, dst, cfg.nmScope);
+        continue;
+      }
       if (fs.existsSync(src) && !fs.existsSync(dst)) {
         fs.mkdirSync(path.dirname(dst), { recursive: true });
         try {

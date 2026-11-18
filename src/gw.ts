@@ -45,6 +45,8 @@
  *                       (--ff-only), prints a READY / NOT-ready verdict. Exit 0 = safe
  *                       to deploy.
  *   gw prune            remove fully-landed, idle sessions (nothing a /done would land).
+ *   gw relink [id|--all] re-sync a session's node_modules farm with the canonical install
+ *                       (done/start/status also do it), so deps landed elsewhere show up.
  *                       --older-than <dur>, --dry-run, --yes.
  *   gw setup            (re)install Claude commands + Codex skills, refresh the gw guidance
  *                       block in the workspace's CLAUDE.md/AGENTS.md, and check tools/repos.
@@ -67,6 +69,7 @@ import {
   assertIsolatedSession, isSessionWorktree, type RepoKey, type RunResult,
   sessionDir, sessionRepoDir, withRepoLandLock, withGateLock, stagedLinkPaths,
   landTmpRoot, landTmpDir, sweepLandTmp, activityLabel, toolchainArgv,
+  relinkSession, matchingFiles, type RelinkReport,
 } from './lib/worktrees.js';
 import { promptBox } from './lib/prompt-box.js';
 import {
@@ -649,6 +652,10 @@ async function cmdDone(flags: Flags): Promise<void> {
       await syncUnchanged(session, branch, pending);
     });
   }
+  // Re-sync the session's node_modules farms with the canonical install before the
+  // gate: a dependency landed (and installed in canonical) since this session
+  // started is otherwise missing from the worktree and the gate fails on it.
+  logRelink(session, relinkSession(WORKTREES_DIR, session));
 
   // 3. Gate ALL changed repos first — one red gate stops everything, nothing merged.
   // The whole gate phase runs under a workspace-wide lock (unless --no-lock) so only
@@ -664,18 +671,24 @@ async function cmdDone(flags: Flags): Promise<void> {
         // full suite — e.g. a deploy gate). --full forces the complete gate regardless.
         // Missing gateQuick safely falls back to the full gate, so quick is never LESS
         // safe than a plain done — at worst it's identical.
-        const useQuick = (flags.quick || REPOS[p.repo].gateQuickDefault) && !flags.full;
-        const scoped = useQuick ? REPOS[p.repo].gateQuick : null;
-        const gate = scoped ?? REPOS[p.repo].gate;
-        if (!gate) continue;
-        if (useQuick && !scoped) log(`[${p.repo}] no gateQuick configured — running the full gate.`);
         // Hand every gate the base ref and the files this branch changed vs it (via env),
         // so a diff-scoped gate can run only the affected tests. Harmless to a gate that
         // ignores them. `origin/<base>...HEAD` is the branch's own changes (origin/<base>
         // was already merged into the worktree above, so this is the net diff to land).
-        const changed = await gitOut(p.wt, ['diff', '--name-only', `origin/${base}...HEAD`]);
-        const gateEnv = { GW_BASE: `origin/${base}`, GW_CHANGED_FILES: changed.split('\n').filter(Boolean).join('\n') };
-        const label = scoped ? 'quick gate' : 'gate';
+        const changedFiles = (await gitOut(p.wt, ['diff', '--name-only', `origin/${base}...HEAD`])).split('\n').filter(Boolean);
+        // A change to something many tests depend on (migrations, a shared package,
+        // middleware, package.json) gets the repo's wide gate (e.g. the whole suite),
+        // even under --quick: a diff-scoped run would miss the tests it breaks.
+        const wideHits = REPOS[p.repo].gateWide ? matchingFiles(changedFiles, REPOS[p.repo].gateWideWhen) : [];
+        const wide = wideHits.length ? REPOS[p.repo].gateWide : null;
+        const useQuick = !wide && (flags.quick || REPOS[p.repo].gateQuickDefault) && !flags.full;
+        const scoped = useQuick ? REPOS[p.repo].gateQuick : null;
+        const gate = wide ?? scoped ?? REPOS[p.repo].gate;
+        if (!gate) continue;
+        if (wide) log(`[${p.repo}] ${wideHits.length} changed file(s) need the wide gate (gateWideWhen), e.g. ${wideHits.slice(0, 3).join(', ')}`);
+        if (useQuick && !scoped) log(`[${p.repo}] no gateQuick configured — running the full gate.`);
+        const gateEnv = { GW_BASE: `origin/${base}`, GW_CHANGED_FILES: changedFiles.join('\n') };
+        const label = wide ? 'wide gate' : scoped ? 'quick gate' : 'gate';
         log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
         const argv = toolchainArgv(gate, p.wt);
         const g = await timed(`${label} ${p.repo}`, () => run(argv[0], argv.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) }));
@@ -984,6 +997,32 @@ function finishCd(flags: Flags): void {
 
 // ── abort ────────────────────────────────────────────────────────────────────
 
+// One line per farm that changed; a loud warning for real files an `npm install`
+// inside the worktree left where gw's links should be.
+function logRelink(session: string, results: Array<{ repo: RepoKey; rel: string; report: RelinkReport }>): void {
+  for (const { repo, rel, report } of results) {
+    if (report.added.length || report.removed.length) {
+      log(`[${repo}] ${session} ${rel}: relinked to canonical (+${report.added.length} -${report.removed.length})${report.added.length ? `, new: ${report.added.slice(0, 5).join(', ')}${report.added.length > 5 ? ', ...' : ''}` : ''}`);
+    }
+    if (report.foreign.length) {
+      log(`[${repo}] ${session} ${rel}: WARNING real files where gw links belong (${report.foreign.slice(0, 5).join(', ')}${report.foreign.length > 5 ? ', ...' : ''}). Something ran npm install in this worktree. Delete them and run \`gw relink ${session}\`; install deps in the canonical checkout only.`);
+    }
+  }
+}
+
+// `gw relink [<id>|--all]`: rebuild node_modules farms against the canonical install.
+// Run after `npm install` in a canonical checkout so open sessions see new deps.
+async function cmdRelink(flags: Flags): Promise<void> {
+  const sessions = flags.all ? listSessions(WORKTREES_DIR) : [resolveSession(flags)].filter((s): s is string => !!s);
+  if (!sessions.length) die('no gw session: run inside a session worktree, pass its id (gw relink WT-NNN), or use --all.');
+  for (const id of sessions) {
+    const results = relinkSession(WORKTREES_DIR, id);
+    logRelink(id, results);
+    if (results.every((r) => !r.report.added.length && !r.report.removed.length && !r.report.foreign.length)) log(`${id}: node_modules already match canonical.`);
+  }
+  emit('NONE');
+}
+
 async function cmdAbort(flags: Flags): Promise<void> {
   const session = resolveSession(flags);
   if (!session) { log('no gw session here — run from inside a session, or pass the session id (gw abort WT-NNN).'); return finishCd(flags); }
@@ -1179,7 +1218,7 @@ function installAgentGuidance(): void {
 // .claude/settings.json, merged in place: other hooks and settings are kept, and an
 // existing gw guard entry is refreshed rather than duplicated. Project-level, so it
 // covers every Claude session started anywhere in the workspace, worktrees included.
-const GUARD_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit';
+const GUARD_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit|Bash'; // Bash: npm install inside a worktree
 function installClaudeGuard(): void {
   const file = path.join(REPO_ROOT, '.claude', 'settings.json');
   let settings: Record<string, unknown> = {};
@@ -1268,6 +1307,8 @@ const pad = (s: string, n: number): string => s.length >= n ? s : s + ' '.repeat
 
 async function cmdStatus(flags: Flags): Promise<void> {
   const sessions = listSessions(WORKTREES_DIR);
+  // Cheap: only farms whose canonical install changed since they were linked.
+  for (const id of sessions) logRelink(id, relinkSession(WORKTREES_DIR, id, REPO_KEYS, { onlyStale: true }));
   if (flags.json) {
     const nowSec = Math.floor(Date.now() / 1000);
     const out = [];
@@ -1589,7 +1630,7 @@ interface Flags {
   dryRun: boolean; noCheck: boolean; noLock: boolean; noSync: boolean; quick: boolean; full: boolean; pr: boolean; inClaude: boolean; yes: boolean;
   echoPrompt: boolean; simulatePushReject: boolean; force: boolean; print: boolean;
   noContinue: boolean; new: boolean; show: boolean; help: boolean; noLaunch: boolean; json: boolean;
-  herdr: boolean; noHerdr: boolean;
+  herdr: boolean; noHerdr: boolean; all: boolean;
   prompt: string | null; name: string;
   message: string; session: string; olderThan: string; repoFlags: string[]; rc: string; agent: string; model: string; effort: string;
   unknown: string[];
@@ -1599,7 +1640,7 @@ function parseFlags(argv: string[]): Flags {
     dryRun: false, noCheck: false, noLock: false, noSync: false, quick: false, full: false, pr: false, inClaude: false, yes: false,
     echoPrompt: false, simulatePushReject: false, force: false, print: false,
     noContinue: false, new: false, show: false, help: false, noLaunch: false, json: false,
-    herdr: false, noHerdr: false,
+    herdr: false, noHerdr: false, all: false,
     prompt: null, name: '',
     message: '', session: '', olderThan: '', repoFlags: [], rc: '', agent: '', model: '', effort: '', unknown: [],
   };
@@ -1622,6 +1663,7 @@ function parseFlags(argv: string[]): Flags {
     else if (a === '--json') f.json = true;
     else if (a === '--herdr') f.herdr = true;
     else if (a === '--no-herdr') f.noHerdr = true;
+    else if (a === '--all') f.all = true;
     else if (a === '--prompt') f.prompt = argv[++i] ?? '';
     else if (a === '--name') f.name = argv[++i] ?? '';
     else if (a === '--echo-prompt') f.echoPrompt = true;
@@ -1673,7 +1715,9 @@ const HELP = `gw — Grove Workspace
                                               --quick runs each repo's lighter,
                                               diff-scoped gateQuick; --full forces
                                               the full gate even where a repo
-                                              defaults to quick via gateQuickDefault)
+                                              defaults to quick via gateQuickDefault;
+                                              a changed file matching a repo's
+                                              gateWideWhen runs its gateWide instead)
   gw done --show                              preview per-repo diff to be landed (read-only)
   gw abort [WT-id] [--yes]                    discard a session's work (shows what's
                                               unlanded first; refuses unlanded work
@@ -1681,6 +1725,10 @@ const HELP = `gw — Grove Workspace
   gw status [--json]                          cross-repo + worktree status
   gw ready [--json]                           done-done check (safe to deploy?)
   gw prune [--older-than 2d] [--dry-run]      remove landed, idle sessions
+  gw relink [WT-id|--all]                     re-sync worktree node_modules links with
+                                              the canonical install (run after npm
+                                              install in a canonical checkout; done,
+                                              start and status do it automatically)
   gw setup                                    (re)install Claude commands + Codex skills,
                                               refresh gw guidance in CLAUDE.md/AGENTS.md
 
@@ -1707,7 +1755,8 @@ const flags = parseFlags(rest);
     case 'status': return cmdStatus(flags);
     case 'ready': return cmdReady(flags);
     case 'prune': return cmdPrune(flags);
+    case 'relink': return cmdRelink(flags);
     case 'setup': return cmdSetup();
-    default: die(`unknown subcommand "${sub}". use: install | doctor | init | start | done | abort | status | ready | prune | setup`);
+    default: die(`unknown subcommand "${sub}". use: install | doctor | init | start | done | abort | status | ready | prune | relink | setup`);
   }
 })().catch((e) => die(e instanceof Error ? e.message : String(e)));

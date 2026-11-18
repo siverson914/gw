@@ -27,6 +27,10 @@ export interface RepoCfg {
   gate: string[] | null;       // fast pre-merge check, run in the worktree; null = none
   gateQuick: string[] | null;  // optional lighter, diff-scoped gate for `gw done --quick`; null = fall back to gate
   gateQuickDefault: boolean;   // run gateQuick by default (no --quick needed); --full forces the full gate anyway
+  gateWide: string[] | null;   // broader gate (e.g. the whole suite) run INSTEAD of gate/gateQuick when a
+                               // changed file matches gateWideWhen, even under --quick; null = never
+  gateWideWhen: string[];      // repo-relative globs (`*`, `**`) that call for gateWide, e.g.
+                               // ["server/src/config/migrations/**", "**/package.json"]
   nmScope?: string;            // npm workspace scope (e.g. "@acme") needing a per-worktree node_modules farm
 }
 
@@ -230,6 +234,8 @@ export function loadWorkspace(start = process.cwd()): Workspace {
       gate: r.gate ?? null,
       gateQuick: r.gateQuick ?? null,
       gateQuickDefault: r.gateQuickDefault ?? false,
+      gateWide: r.gateWide ?? null,
+      gateWideWhen: r.gateWideWhen ?? [],
       nmScope: r.nmScope,
     };
   }

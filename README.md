@@ -111,6 +111,7 @@ Run `gw done` directly (no agent) and it still builds a structured message from 
 | `gw ready [--json]` | The **done-done** check: no session holds unlanded work, every checkout sits exactly on `origin/<base>`. Exit 0 = a deploy ships exactly what landed. |
 | `gw abort [WT-id] [--yes]` | Discard a session's branch work in every repo. Base branches are never touched. Agent wrappers use `--in-agent`, which refuses to discard unlanded work unless `--yes` is passed, so an agent can never silently destroy real work. |
 | `gw prune [--older-than 2d] [--dry-run]` | Remove fully-landed, idle sessions. |
+| `gw relink [WT-id\|--all]` | Re-sync a session's (or every session's) node_modules links with the canonical install, keeping its own workspace-scope links. Run after `npm install` in a canonical checkout; `done`, re-entering `start`, and `status` (when the canonical install changed) do it automatically. |
 | `gw setup` | (Re)install Claude commands and Codex skills, refresh the gw guidance block in the workspace's `CLAUDE.md`/`AGENTS.md`, then sanity-check tools/repos. Run once per machine: the commands find the workspace from the worktree they run in, so one install serves every gw workspace on that machine. |
 | `/done` or `$gw-done` | Agent-facing wrappers around the same `gw done` engine. Claude also gets `/abort`, `/donedone`, and `/gw-sessions`; Codex gets `$gw-abort`, `$gw-donedone`, and `$gw-sessions`. |
 
@@ -131,7 +132,7 @@ remain configurable under `agents`.
 
 - **Failures never lose work.** Landing happens in a disposable worktree off `origin/<base>`: a dirty checkout can't block it, a failed land strands nothing, and `gw done` is idempotent — re-run and it finishes the rest.
 - **Sessions are strictly isolated.** gw refuses to stage/commit/land in any path that isn't a genuine `gw/<id>` linked worktree, so edits can never hit a canonical checkout.
-- **Catches the "wrong copy" mistake.** If a repo's canonical checkout has uncommitted edits while its session worktree is clean, `gw done` warns loudly — those edits won't silently get left behind. `gw setup` also installs a Claude Code `PreToolUse` write guard (`hooks/guard.mjs`, in the workspace's `.claude/settings.json`) that *blocks* Write/Edit on a canonical checkout and points at the same file in the open session; git-ignored files (like a linked `.env`) are allowed, and `GW_ALLOW_MAIN=1` bypasses it.
+- **Catches the "wrong copy" mistake.** If a repo's canonical checkout has uncommitted edits while its session worktree is clean, `gw done` warns loudly — those edits won't silently get left behind. `gw setup` also installs a Claude Code `PreToolUse` write guard (`hooks/guard.mjs`, in the workspace's `.claude/settings.json`) that *blocks* Write/Edit on a canonical checkout and points at the same file in the open session; git-ignored files (like a linked `.env`) are allowed, and `GW_ALLOW_MAIN=1` bypasses it. The same hook blocks a Bash `npm install`/`npm ci` (and other node_modules-writing npm commands) inside a session worktree, whose node_modules are links into the canonical install; `npm install --package-lock-only` is allowed.
 - **Canonical checkouts advance — or say why they didn't.** After a land, gw fast-forwards each shared checkout to `origin/<base>` so the next `gw start` (and any deploy) sees fresh code. It tests **content-level** dirtiness (not just `git status`, which a mtime-only-touched file can trip), so a checkout doesn't get stuck behind origin; when it genuinely can't advance it warns that deploys from there would ship stale code. (See [docs/postmortem-stale-deploy.md](docs/postmortem-stale-deploy.md).)
 - **`gw ready` only ever fast-forwards** (`--ff-only`) a clean checkout — it can never clobber local work.
 
@@ -220,6 +221,8 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` �
       "gate": ["npm", "run", "test:fast"],         // fast pre-merge check; null = none
       "gateQuick": ["npm", "run", "test:changed"], // optional lighter gate for `gw done --quick`; null = fall back to gate
       "gateQuickDefault": true,                    // run gateQuick by default (no --quick); --full forces the full gate
+      "gateWide": ["npm", "run", "test:all"],      // optional broader gate for risky changes (see gateWideWhen)
+      "gateWideWhen": ["db/migrations/**", "**/package.json"], // changed-file globs that select gateWide
       "nmScope": "@myproject"                      // npm workspace scope needing a per-worktree node_modules farm
     }
   ]
@@ -235,7 +238,8 @@ automatically. Each session saves its selection in
 - **`sessionGate`**: `{ "repo": "server", "commands": [["npx","tsx","scripts/build-docs.ts","--check"]] }` — runs from that repo's worktree to catch cross-repo drift (e.g. a generated file) a per-repo gate would miss. Skipped when that repo itself changed (its own gate covers it).
 - **`gateQuick`**: an optional lighter, diff-scoped gate used under `gw done --quick`; without it, `--quick` runs the full `gate` (never *less* safe). Every gate — full or quick — is handed `GW_BASE` (the base ref) and `GW_CHANGED_FILES` (newline-separated paths changed on the branch), so a quick gate can run just the affected tests (e.g. `jest --changedSince=$GW_BASE`).
 - **`gateQuickDefault`**: set `true` to run `gateQuick` on *every* land without `--quick` (pass `--full` to force the complete gate anyway). Only safe where something downstream re-runs the full suite — e.g. a deploy that gates on tests. A repo that ships straight from a land with no later full run should leave this off so its full `gate` stays the pre-ship line.
-- **`nmScope`**: set only for npm/yarn **workspace** monorepos where `node_modules/<scope>/*` symlinks back into the repo; gw rebuilds those links per-worktree so a worktree's edits to a local package are seen by its own tests.
+- **`gateWide`** / **`gateWideWhen`**: when any changed file matches a `gateWideWhen` glob (`*` within a path segment, `**` any depth), gw runs `gateWide` instead of `gate`/`gateQuick`, even under `--quick` or `gateQuickDefault`. Use it for changes a diff-scoped run can't localize: migrations, a shared package, middleware, dependency manifests.
+- **`nmScope`**: set only for npm/yarn **workspace** monorepos where `node_modules/<scope>/*` symlinks back into the repo; gw rebuilds those links per-worktree so a worktree's edits to a local package are seen by its own tests. That farm is a snapshot, so gw re-syncs it with the canonical install (`gw relink`) on `gw done` before the gate, on re-entering a session, and from `gw status` whenever the canonical `node_modules/.package-lock.json` changed. Never run `npm install` inside a worktree (the write guard blocks it for Claude): install in the canonical checkout, then `gw relink --all`.
 
 ## Testing
 

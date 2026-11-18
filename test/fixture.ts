@@ -33,7 +33,10 @@ export interface RepoOverrides {
   gate?: string[] | null;
   gateQuick?: string[];
   gateQuickDefault?: boolean;
+  gateWide?: string[];
+  gateWideWhen?: string[];
   linkPaths?: string[];
+  nmScope?: string;
   trackedEnv?: boolean; // seed a TRACKED .env in the initial commit (the linkPath scar case)
 }
 
@@ -93,6 +96,8 @@ export function writeConfig(root: string, repos: Record<string, RepoOverrides>):
       gate: o.gate ?? null,
       ...(o.gateQuick ? { gateQuick: o.gateQuick } : {}),
       ...(o.gateQuickDefault ? { gateQuickDefault: true } : {}),
+      ...(o.gateWide ? { gateWide: o.gateWide, gateWideWhen: o.gateWideWhen ?? [] } : {}),
+      ...(o.nmScope ? { nmScope: o.nmScope } : {}),
     })),
   };
   fs.writeFileSync(path.join(root, 'gw.config.json'), JSON.stringify(cfg, null, 2) + '\n');

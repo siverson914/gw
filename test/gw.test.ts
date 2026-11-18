@@ -16,8 +16,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { makeFixture, gw, git, startSession, cleanupFixtures } from './fixture.js';
-import { parseId, slugify, toolchainArgv, findOnPath } from '../src/lib/worktrees.js';
+import { makeFixture, gw, git, startSession, cleanupFixtures, writeConfig } from './fixture.js';
+import { parseId, slugify, toolchainArgv, findOnPath, globToRegExp, matchingFiles } from '../src/lib/worktrees.js';
 
 after(cleanupFixtures);
 
@@ -269,6 +269,130 @@ test('quick tier: gateQuickDefault runs gateQuick with GW_CHANGED_FILES; --full 
   const r2 = await gw(fx, ['done', id2, '--full', '-m', 'feat: two'], { env });
   assert.equal(r2.code, 0, r2.stderr);
   assert.ok(fs.existsSync(path.join(fx.root, 'full')), '--full must force the full gate');
+});
+
+test('globToRegExp: * stays in one segment, ** spans any depth (including none)', () => {
+  assert.ok(globToRegExp('**/package.json').test('package.json'));
+  assert.ok(globToRegExp('**/package.json').test('server/package.json'));
+  assert.ok(!globToRegExp('**/package.json').test('server/package.json.bak'));
+  assert.ok(globToRegExp('server/src/middleware/**').test('server/src/middleware/auth.ts'));
+  assert.ok(globToRegExp('server/src/middleware/**').test('server/src/middleware/a/b.ts'));
+  assert.ok(!globToRegExp('server/*.ts').test('server/src/x.ts'));
+  assert.ok(globToRegExp('a.b?').test('a.bc') && !globToRegExp('a.b?').test('axbc'), '. is literal, ? is one char');
+  assert.deepStrictEqual(matchingFiles(['README.md', 'db/1.sql', 'x/package.json'], ['db/**', '**/package.json']), ['db/1.sql', 'x/package.json']);
+});
+
+test('wide tier: a changed file matching gateWideWhen runs gateWide instead of the quick gate, even with --quick', async () => {
+  const mk = (name: string) => ['bash', '-c', `touch "$GW_MARK_DIR/${name}"`];
+  const fx = makeFixture({
+    repos: { a: { gate: mk('full'), gateQuick: mk('quick'), gateQuickDefault: true, gateWide: mk('wide'), gateWideWhen: ['db/**', '**/package.json'] } },
+  });
+  const env = { GW_MARK_DIR: fx.root };
+  const marks = () => ['full', 'quick', 'wide'].filter((m) => fs.existsSync(path.join(fx.root, m)));
+  const clear = () => { for (const m of ['full', 'quick', 'wide']) fs.rmSync(path.join(fx.root, m), { force: true }); };
+
+  const id1 = await startSession(fx);
+  fs.writeFileSync(path.join(fx.wt(id1, 'a'), 'notes.txt'), 'x\n');
+  const r1 = await gw(fx, ['done', id1, '-m', 'feat: notes'], { env });
+  assert.equal(r1.code, 0, r1.stderr);
+  assert.deepStrictEqual(marks(), ['quick']);
+
+  clear();
+  const id2 = await startSession(fx);
+  fs.mkdirSync(path.join(fx.wt(id2, 'a'), 'db'));
+  fs.writeFileSync(path.join(fx.wt(id2, 'a'), 'db', '1.sql'), 'select 1;\n');
+  const r2 = await gw(fx, ['done', id2, '--quick', '-m', 'feat: migration'], { env });
+  assert.equal(r2.code, 0, r2.stderr);
+  assert.deepStrictEqual(marks(), ['wide']);
+  assert.match(r2.stderr, /wide gate: .*db\/1\.sql|need the wide gate.*db\/1\.sql/);
+
+  clear();
+  const id3 = await startSession(fx);
+  fs.mkdirSync(path.join(fx.wt(id3, 'a'), 'pkg'));
+  fs.writeFileSync(path.join(fx.wt(id3, 'a'), 'pkg', 'package.json'), '{}\n');
+  assert.equal((await gw(fx, ['done', id3, '-m', 'chore: pkg'], { env })).code, 0);
+  assert.deepStrictEqual(marks(), ['wide'], 'a nested package.json matches **/package.json');
+});
+
+/** Canonical `a` with a gitignored node_modules: two third-party packages and a
+ *  workspace-scope package linked relatively, like an npm workspace install. */
+function nmFixture() {
+  const fx = makeFixture({ repos: { a: { linkPaths: ['node_modules'], nmScope: '@sc' }, b: {} } });
+  const co = fx.co('a');
+  fs.writeFileSync(path.join(co, '.gitignore'), 'node_modules\n');
+  fs.mkdirSync(path.join(co, 'pkgs', 'self'), { recursive: true });
+  fs.writeFileSync(path.join(co, 'pkgs', 'self', 'index.js'), 'export {};\n');
+  git(co, ['add', '-A']); git(co, ['commit', '-q', '-m', 'ignore nm']); git(co, ['push', '-q']);
+  const nm = path.join(co, 'node_modules');
+  for (const p of ['left-pad', 'old-dep']) fs.mkdirSync(path.join(nm, p), { recursive: true });
+  fs.mkdirSync(path.join(nm, '@sc'), { recursive: true });
+  fs.symlinkSync('../../pkgs/self', path.join(nm, '@sc', 'self'));
+  fs.writeFileSync(path.join(nm, '.package-lock.json'), '{"v":1}\n');
+  return { fx, nm };
+}
+
+test('relink: a session sees deps canonical installed after it started; dropped ones and dangling links go; scope links stay', async () => {
+  const { fx, nm } = nmFixture();
+  const id = await startSession(fx);
+  const farm = path.join(fx.wt(id, 'a'), 'node_modules');
+  assert.ok(!fs.lstatSync(farm).isSymbolicLink(), 'a scoped node_modules is a per-worktree farm');
+  assert.equal(fs.readlinkSync(path.join(farm, '@sc', 'self')), '../../pkgs/self', 'scope link keeps its relative target');
+  assert.ok(fs.existsSync(path.join(farm, 'old-dep')));
+
+  // Another session's dependency lands and canonical reinstalls: new-dep hoisted, old-dep gone.
+  fs.mkdirSync(path.join(nm, 'new-dep'));
+  fs.rmSync(path.join(nm, 'old-dep'), { recursive: true });
+  const r = await gw(fx, ['relink', id]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fs.readlinkSync(path.join(farm, 'new-dep')), path.join(nm, 'new-dep'));
+  assert.ok(fs.existsSync(path.join(farm, 'left-pad')), 'unchanged deps stay linked');
+  assert.throws(() => fs.lstatSync(path.join(farm, 'old-dep')), 'dangling link removed');
+  assert.equal(fs.readlinkSync(path.join(farm, '@sc', 'self')), '../../pkgs/self');
+  assert.match(r.stderr, /relinked to canonical \(\+1 -1\), new: new-dep/);
+
+  // A real dir where a link belongs (an npm install in the worktree) is reported, never deleted.
+  fs.mkdirSync(path.join(farm, 'stray'));
+  const r2 = await gw(fx, ['relink', '--all']);
+  assert.equal(r2.code, 0, r2.stderr);
+  assert.match(r2.stderr, /WARNING real files where gw links belong \(stray\)/);
+  assert.ok(fs.existsSync(path.join(farm, 'stray')));
+  fs.rmSync(path.join(farm, 'stray'), { recursive: true });
+
+  // status relinks only when the canonical install changed (npm rewrites .package-lock.json).
+  fs.mkdirSync(path.join(nm, 'later-dep'));
+  const quiet = await gw(fx, ['status']);
+  assert.ok(!fs.existsSync(path.join(farm, 'later-dep')), 'unchanged install stamp: status leaves the farm alone');
+  assert.equal(quiet.code, 0, quiet.stderr);
+  fs.writeFileSync(path.join(nm, '.package-lock.json'), '{"v":2,"more":true}\n');
+  assert.equal((await gw(fx, ['status'])).code, 0);
+  assert.ok(fs.existsSync(path.join(farm, 'later-dep')), 'changed install stamp: status relinked');
+});
+
+test('done relinks the session farm before the gate, so the gate sees a dep landed elsewhere', async () => {
+  const { fx, nm } = nmFixture();
+  // The gate fails unless the dep canonical installed after the session started is visible.
+  writeConfig(fx.root, { a: { linkPaths: ['node_modules'], nmScope: '@sc', gate: ['bash', '-c', 'test -e node_modules/fresh-dep'] }, b: {} });
+  const id = await startSession(fx);
+  fs.mkdirSync(path.join(nm, 'fresh-dep'));
+  fs.writeFileSync(path.join(fx.wt(id, 'a'), 'x.txt'), 'x\n');
+  const r = await gw(fx, ['done', id, '-m', 'feat: x']);
+  assert.equal(r.code, 0, r.stderr);
+});
+
+test('write guard blocks npm install/ci inside a session worktree, allows --package-lock-only and canonical installs', async () => {
+  const fx = makeFixture();
+  const id = await startSession(fx);
+  const bash = (cwd: string, command: string) => guard({ cwd, tool_name: 'Bash', tool_input: { command } });
+  const wt = fx.wt(id, 'a');
+  for (const c of ['npm install', 'npm i left-pad', 'npm ci', 'npm --prefix server install', 'cd x && npm uninstall y']) {
+    const r = bash(wt, c);
+    assert.equal(r.code, 2, c);
+    assert.match(r.stderr, /inside a gw session worktree is blocked/);
+  }
+  assert.equal(bash(fx.root, `cd .worktrees/${id}/a && npm install`).code, 2, 'a cd into a worktree from the root counts');
+  assert.equal(bash(wt, 'npm install --package-lock-only --ignore-scripts left-pad').code, 0);
+  for (const c of ['npm test', 'npm run test:install', 'pnpm install', 'npx tsc']) assert.equal(bash(wt, c).code, 0, c);
+  assert.equal(bash(fx.co('a'), 'npm install').code, 0, 'canonical checkout installs pass');
 });
 
 // ── the scar-tissue invariants ───────────────────────────────────────────────
@@ -760,7 +884,7 @@ test('setup installs the write guard into .claude/settings.json once, keeping ot
   const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   const guards = s.hooks.PreToolUse.filter((e: { hooks: Array<{ command: string }> }) => e.hooks.some((h) => h.command.includes('guard.mjs')));
   assert.equal(guards.length, 1, 'exactly one guard entry after two runs');
-  assert.equal(guards[0].matcher, 'Write|Edit|MultiEdit|NotebookEdit');
+  assert.equal(guards[0].matcher, 'Write|Edit|MultiEdit|NotebookEdit|Bash');
   assert.ok(guards[0].hooks[0].command.includes(GUARD));
   assert.deepStrictEqual(s.hooks.PreToolUse[0], other, 'existing PreToolUse hook kept');
   assert.equal(s.hooks.Stop[0].hooks[0].command, 'echo stop');
