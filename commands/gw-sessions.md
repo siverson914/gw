@@ -29,6 +29,8 @@ Pick one:
 - **Yourself:** edit files by their absolute paths under the session's `dir`, and run commands with `git -C <repo dir> …` or in a subshell `(cd <repo dir> && …)`. Never edit the canonical checkouts at `<root>/<repo>` — only paths under `<root>/.worktrees/<id>/`.
 - **Delegate to a subagent** (best for parallel sessions): spawn one agent per session, and give it the task, the session `dir`, and the per-repo dirs from the JSON. Tell it: *work only under `<dir>`, use absolute paths or `(cd <repo dir> && …)`, commit or leave edits uncommitted as it likes, and do NOT run `/done`, `/abort`, or any `gw` command* — landing stays with you.
 
+**Shared helpers under parallel sessions:** a session that changes a shared helper's signature (a function other code calls, like a rate limiter factory) lands that change first, on its own small session, before any dependent work. Parallel sessions branched earlier keep calling the old signature, so landing the helper change alone lets them merge it in and adapt instead of breaking main.
+
 ## 3. Check on sessions
 
 ```bash
