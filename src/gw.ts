@@ -686,7 +686,7 @@ async function cmdDone(flags: Flags): Promise<void> {
         const gate = wide ?? scoped ?? REPOS[p.repo].gate;
         if (!gate) continue;
         if (wide) log(`[${p.repo}] ${wideHits.length} changed file(s) need the wide gate (gateWideWhen), e.g. ${wideHits.slice(0, 3).join(', ')}`);
-        if (useQuick && !scoped) log(`[${p.repo}] no gateQuick configured — running the full gate.`);
+        if (useQuick && !scoped) log(`[${p.repo}] no gateQuick configured, running the full gate.`);
         const gateEnv = { GW_BASE: `origin/${base}`, GW_CHANGED_FILES: changedFiles.join('\n') };
         const label = wide ? 'wide gate' : scoped ? 'quick gate' : 'gate';
         log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
