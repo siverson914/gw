@@ -30,7 +30,9 @@ export interface RepoCfg {
   gateWide: string[] | null;   // broader gate (e.g. the whole suite) run INSTEAD of gate/gateQuick when a
                                // changed file matches gateWideWhen, even under --quick; null = never
   gateWideWhen: string[];      // repo-relative globs (`*`, `**`) that call for gateWide, e.g.
-                               // ["server/src/config/migrations/**", "**/package.json"]
+                               // ["server/src/config/migrations/**", "packages/shared/**"]
+  gateWideTimeoutMs: number | null; // timeout for gateWide (a whole suite outlasts the 25 min default);
+                               // null = the default. GW_GATE_TIMEOUT_MS still overrides every gate.
   nmScope?: string;            // npm workspace scope (e.g. "@acme") needing a per-worktree node_modules farm
 }
 
@@ -236,6 +238,7 @@ export function loadWorkspace(start = process.cwd()): Workspace {
       gateQuickDefault: r.gateQuickDefault ?? false,
       gateWide: r.gateWide ?? null,
       gateWideWhen: r.gateWideWhen ?? [],
+      gateWideTimeoutMs: r.gateWideTimeoutMs ?? null,
       nmScope: r.nmScope,
     };
   }

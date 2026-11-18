@@ -568,9 +568,10 @@ interface Pending { repo: RepoKey; wt: string; branch: string; name: string; }
 
 // Gate timeout: 25 min default (an iOS gate on a Mac busy with parallel sessions ran past 12). GW_GATE_TIMEOUT_MS overrides — primarily so the test
 // harness can exercise the timeout path in milliseconds instead of minutes.
-function gateTimeoutMs(): number {
+function gateTimeoutMs(configured: number | null = null): number {
   const v = parseInt(process.env.GW_GATE_TIMEOUT_MS ?? '', 10);
-  return Number.isFinite(v) && v > 0 ? v : 25 * 60_000;
+  if (Number.isFinite(v) && v > 0) return v;
+  return configured && configured > 0 ? configured : 25 * 60_000;
 }
 /** "90000" → "1.5m", "2000" → "2s" — for timeout messages. */
 function fmtMs(ms: number): string {
@@ -691,12 +692,13 @@ async function cmdDone(flags: Flags): Promise<void> {
         const label = wide ? 'wide gate' : scoped ? 'quick gate' : 'gate';
         log(`[${p.repo}] ${label}: ${gate.join(' ')} ...`);
         const argv = toolchainArgv(gate, p.wt);
-        const g = await timed(`${label} ${p.repo}`, () => run(argv[0], argv.slice(1), { cwd: p.wt, timeoutMs: gateTimeoutMs(), env: gateEnv, onStdout: (s) => process.stderr.write(s) }));
+        const timeoutMs = gateTimeoutMs(wide ? REPOS[p.repo].gateWideTimeoutMs : null);
+        const g = await timed(`${label} ${p.repo}`, () => run(argv[0], argv.slice(1), { cwd: p.wt, timeoutMs, env: gateEnv, onStdout: (s) => process.stderr.write(s) }));
         if (g.timedOut || g.code !== 0) logTimings();
         // A timeout SIGKILLs the process tree and surfaces as `code: null` — say so
         // explicitly instead of the cryptic "gate failed (exit null)" (which historically
         // meant an OOM-killed or hung suite and sent people down the wrong path).
-        if (g.timedOut) die(`[${p.repo}] ${label} TIMED OUT after ${fmtMs(gateTimeoutMs())} and was killed. A hung suite or starved test resource, not a test failure. Re-run, or skip with --no-check. Nothing was merged.`);
+        if (g.timedOut) die(`[${p.repo}] ${label} TIMED OUT after ${fmtMs(timeoutMs)} and was killed. A hung suite or starved test resource, not a test failure. Re-run, or skip with --no-check. Nothing was merged.`);
         if (g.code !== 0) die(`[${p.repo}] ${label} failed (exit ${g.code}). Fix and re-run, or skip with --no-check. Nothing was merged.`);
         log(`[${p.repo}] ${label} passed.`);
       }

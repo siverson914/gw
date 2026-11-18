@@ -314,6 +314,16 @@ test('wide tier: a changed file matching gateWideWhen runs gateWide instead of t
   assert.deepStrictEqual(marks(), ['wide'], 'a nested package.json matches **/package.json');
 });
 
+test('wide tier uses its own gateWideTimeoutMs, not the default gate timeout', async () => {
+  const fx = makeFixture({ repos: { a: { gate: ['true'], gateWide: ['sleep', '5'], gateWideWhen: ['db/**'], gateWideTimeoutMs: 1000 } } });
+  const id = await startSession(fx);
+  fs.mkdirSync(path.join(fx.wt(id, 'a'), 'db'));
+  fs.writeFileSync(path.join(fx.wt(id, 'a'), 'db', '1.sql'), 'select 1;\n');
+  const r = await gw(fx, ['done', id, '-m', 'feat: migration']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /wide gate TIMED OUT after 1s/);
+});
+
 /** Canonical `a` with a gitignored node_modules: two third-party packages and a
  *  workspace-scope package linked relatively, like an npm workspace install. */
 function nmFixture() {

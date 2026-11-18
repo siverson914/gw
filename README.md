@@ -222,7 +222,8 @@ It keeps one worktree set per session under `<root>/.worktrees/<WT-id>/<repo>` �
       "gateQuick": ["npm", "run", "test:changed"], // optional lighter gate for `gw done --quick`; null = fall back to gate
       "gateQuickDefault": true,                    // run gateQuick by default (no --quick); --full forces the full gate
       "gateWide": ["npm", "run", "test:all"],      // optional broader gate for risky changes (see gateWideWhen)
-      "gateWideWhen": ["db/migrations/**", "**/package.json"], // changed-file globs that select gateWide
+      "gateWideWhen": ["db/migrations/**", "packages/shared/**"], // changed-file globs that select gateWide
+      "gateWideTimeoutMs": 5400000,                // timeout for gateWide (default: the 25 min gate timeout)
       "nmScope": "@myproject"                      // npm workspace scope needing a per-worktree node_modules farm
     }
   ]
@@ -238,7 +239,7 @@ automatically. Each session saves its selection in
 - **`sessionGate`**: `{ "repo": "server", "commands": [["npx","tsx","scripts/build-docs.ts","--check"]] }` — runs from that repo's worktree to catch cross-repo drift (e.g. a generated file) a per-repo gate would miss. Skipped when that repo itself changed (its own gate covers it).
 - **`gateQuick`**: an optional lighter, diff-scoped gate used under `gw done --quick`; without it, `--quick` runs the full `gate` (never *less* safe). Every gate — full or quick — is handed `GW_BASE` (the base ref) and `GW_CHANGED_FILES` (newline-separated paths changed on the branch), so a quick gate can run just the affected tests (e.g. `jest --changedSince=$GW_BASE`).
 - **`gateQuickDefault`**: set `true` to run `gateQuick` on *every* land without `--quick` (pass `--full` to force the complete gate anyway). Only safe where something downstream re-runs the full suite — e.g. a deploy that gates on tests. A repo that ships straight from a land with no later full run should leave this off so its full `gate` stays the pre-ship line.
-- **`gateWide`** / **`gateWideWhen`**: when any changed file matches a `gateWideWhen` glob (`*` within a path segment, `**` any depth), gw runs `gateWide` instead of `gate`/`gateQuick`, even under `--quick` or `gateQuickDefault`. Use it for changes a diff-scoped run can't localize: migrations, a shared package, middleware, dependency manifests.
+- **`gateWide`** / **`gateWideWhen`**: when any changed file matches a `gateWideWhen` glob (`*` within a path segment, `**` any depth), gw runs `gateWide` instead of `gate`/`gateQuick`, even under `--quick` or `gateQuickDefault`. Use it for changes a diff-scoped run can't localize: migrations, a shared package, middleware. Keep the list to the truly risky paths: the wide gate holds the workspace gate lock for its whole run. `gateWideTimeoutMs` gives it a realistic timeout (a whole suite outlasts the 25 min default); `GW_GATE_TIMEOUT_MS` still overrides every gate.
 - **`nmScope`**: set only for npm/yarn **workspace** monorepos where `node_modules/<scope>/*` symlinks back into the repo; gw rebuilds those links per-worktree so a worktree's edits to a local package are seen by its own tests. That farm is a snapshot, so gw re-syncs it with the canonical install (`gw relink`) on `gw done` before the gate, on re-entering a session, and from `gw status` whenever the canonical `node_modules/.package-lock.json` changed. Never run `npm install` inside a worktree (the write guard blocks it for Claude): install in the canonical checkout, then `gw relink --all`.
 
 ## Testing

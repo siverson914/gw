@@ -35,6 +35,7 @@ export interface RepoOverrides {
   gateQuickDefault?: boolean;
   gateWide?: string[];
   gateWideWhen?: string[];
+  gateWideTimeoutMs?: number;
   linkPaths?: string[];
   nmScope?: string;
   trackedEnv?: boolean; // seed a TRACKED .env in the initial commit (the linkPath scar case)
@@ -96,7 +97,7 @@ export function writeConfig(root: string, repos: Record<string, RepoOverrides>):
       gate: o.gate ?? null,
       ...(o.gateQuick ? { gateQuick: o.gateQuick } : {}),
       ...(o.gateQuickDefault ? { gateQuickDefault: true } : {}),
-      ...(o.gateWide ? { gateWide: o.gateWide, gateWideWhen: o.gateWideWhen ?? [] } : {}),
+      ...(o.gateWide ? { gateWide: o.gateWide, gateWideWhen: o.gateWideWhen ?? [], gateWideTimeoutMs: o.gateWideTimeoutMs ?? null } : {}),
       ...(o.nmScope ? { nmScope: o.nmScope } : {}),
     })),
   };
