@@ -4,6 +4,8 @@ This directory is a **gw workspace**. Each task runs in its own **session**: one
 
 **Rule #1: the canonical checkouts ({{REPOS}}) are READ-ONLY.** Make every edit in a session worktree, e.g. `.worktrees/<WT-id>/<repo>/path/file`, never `<repo>/path/file`. `gw done` only sees changes inside the worktree, so edits to the canonical copy silently never land. This applies whether you're inside a session or managing sessions from this root.
 
+**Rule #2: `main` (each repo's base branch) is always ready for prod, and only `main` is deployed.** Land a session (`/done`) only when its work is finished and could ship; work in progress stays in its session, unlanded, as long as it needs. Never deploy from a session branch or a canonical checkout: deploy what is on `main`, from a fresh session started off `origin/<base>` (land any version files the deploy writes with that session's `/done`).
+
 **Which command to use:**
 
 | Situation | Use |
